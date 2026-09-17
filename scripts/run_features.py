@@ -30,6 +30,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="DuckDB path (default data/cmram.duckdb or CMRAM_DUCKDB_PATH).",
     )
     p.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Features YAML path (default config/features.yaml).",
+    )
+    p.add_argument(
+        "--parquet",
+        type=str,
+        default=None,
+        help="Optional parquet output path (default data/features/features_daily.parquet).",
+    )
+    p.add_argument(
         "--no-parquet",
         action="store_true",
         help="Skip writing data/features/features_daily.parquet.",
@@ -85,13 +97,19 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
-    cfg = load_features_config()
+    cfg = load_features_config(Path(args.config) if args.config else None)
     db_path = Path(args.db) if args.db else get_duckdb_path()
-    parquet = None if args.no_parquet else get_features_dir() / "features_daily.parquet"
+    if args.no_parquet:
+        parquet = None
+    elif args.parquet:
+        parquet = Path(args.parquet)
+    else:
+        parquet = get_features_dir() / "features_daily.parquet"
 
     print("CMRAM run_features")
     print(f"  models: {cfg.get('models')}")
     print(f"  model_version: {cfg.get('model_version')}")
+    print(f"  config: {args.config or 'config/features.yaml'}")
     print(f"  duckdb: {db_path}")
     print("  status: computing C/V/P/(N) + NSI (no signals; not alpha)")
 

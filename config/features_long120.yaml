@@ -1,0 +1,96 @@
+# CMRAM feature lookbacks — LONG ~120-day style windows
+# Only used when mid (30–60) showed no holdout edge vs random.
+# Keep config/features.yaml (short) and config/features_mid.yaml intact.
+# Research definitions only — not validated alpha parameters.
+#
+# Schema note: features_daily PK is (timestamp, asset_id, band, model) without
+# model_version → DuckDB overwrite when switching versions; keep versioned parquet.
+#
+# Caveat: market history ≈180d; membership starts ~2026-06-18. Full 120d rolling
+# needs ~120 prior market bars → early membership days may be NaN until history fills.
+#
+# -----------------------------------------------------------------------------
+# Lookback mapping: short → mid → long120
+#   supporting shorts ≈30d; supporting mids ≈60d; long style ≈120d
+# -----------------------------------------------------------------------------
+# key                      | short | mid | long120 | role
+# high_days                | 20    | 60  | 120     | C: high lookback
+# range_short_days         | 10    | 30  | 60      | C: nested range short (support)
+# range_long_days          | 40    | 60  | 120     | C: nested range long
+# vol_short_days           | 7     | 30  | 60      | C: vol ratio short
+# vol_long_days            | 30    | 60  | 120     | C: vol ratio long
+# sell_short_days          | 5     | 30  | 60      | C: sell pressure short
+# sell_long_days           | 20    | 60  | 120     | C: sell pressure long
+# stabilize_short_days     | 5     | 30  | 60      | C: stabilize short
+# stabilize_long_days      | 20    | 60  | 120     | C: stabilize long
+# rvol_short_days          | 3     | 30  | 60      | V: RVOL short
+# rvol_long_days           | 30    | 60  | 120     | V: RVOL long
+# vol_growth_short_days    | 7     | 30  | 60      | V: volume growth short
+# vol_growth_long_days     | 28    | 60  | 120     | V: volume growth long
+# velocity_days            | 3     | 30  | 60      | V: velocity
+# logvol_accel_days        | 7     | 30  | 60      | V: log-vol accel
+# ret_short_days           | 3     | 30  | 60      | P: return short
+# ret_medium_days          | 7     | 60  | 120     | P: return medium
+# rs_short_days            | 7     | 30  | 60      | P: RS short
+# rs_long_days             | 14    | 60  | 120     | P: RS long
+# higher_lows_short_days   | 10    | 30  | 60      | P: higher lows short
+# higher_lows_long_days    | 20    | 60  | 120     | P: higher lows long
+# breakout_days            | 20    | 60  | 120     | P: breakout high
+# sma_days                 | 20    | 60  | 120     | NSI: SMA
+# extension_days           | 14    | 60  | 120     | NSI: extension
+# mom_dec_days             | 7     | 30  | 60      | NSI: momentum decay
+# n_vel_short_days         | 7     | 30  | 60      | N: attention velocity short
+# n_vel_long_days          | 28    | 60  | 120     | N: attention velocity long
+# n_accel_days             | 7     | 30  | 60      | N: attention accel
+# -----------------------------------------------------------------------------
+
+model_version: features_long120_v0.1
+models:
+  - A
+  - B
+  - C
+
+small_sample_n: 10
+volume_floor_usd: 1.0
+rvol_clip: 10.0
+
+btc_asset_ids:
+  - bitcoin
+
+attention_floor: 0.1
+social_combine: mean
+
+lookbacks:
+  # Compression C (support 60 / long 120)
+  high_days: 120
+  range_short_days: 60
+  range_long_days: 120
+  vol_short_days: 60
+  vol_long_days: 120
+  sell_short_days: 60
+  sell_long_days: 120
+  stabilize_short_days: 60
+  stabilize_long_days: 120
+  # Volume V
+  rvol_short_days: 60
+  rvol_long_days: 120
+  vol_growth_short_days: 60
+  vol_growth_long_days: 120
+  velocity_days: 60
+  logvol_accel_days: 60
+  # Price P
+  ret_short_days: 60
+  ret_medium_days: 120
+  rs_short_days: 60
+  rs_long_days: 120
+  higher_lows_short_days: 60
+  higher_lows_long_days: 120
+  breakout_days: 120
+  # NSI legs
+  sma_days: 120
+  extension_days: 120
+  mom_dec_days: 60
+  # Narrative N
+  n_vel_short_days: 60
+  n_vel_long_days: 120
+  n_accel_days: 60
