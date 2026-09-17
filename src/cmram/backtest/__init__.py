@@ -12,6 +12,10 @@ from cmram.backtest.spike_detect import detect_spikes, forward_max_return
 from cmram.backtest.spike_backward import run_spike_backward, write_spike_backward_report
 from cmram.backtest.spike_shared_setups import run_spike_shared_setups, write_shared_setups_report
 from cmram.backtest.volume_expansion import run_volume_expansion_study, write_volume_expansion_report
+from cmram.backtest.draft_formula_fair_test import (
+    run_draft_formula_fair_test,
+    write_draft_formula_fair_test_report,
+)
 
 __all__ = [
     "run_backtest",
@@ -29,4 +33,6 @@ __all__ = [
     "write_shared_setups_report",
     "run_volume_expansion_study",
     "write_volume_expansion_report",
+    "run_draft_formula_fair_test",
+    "write_draft_formula_fair_test_report",
 ]

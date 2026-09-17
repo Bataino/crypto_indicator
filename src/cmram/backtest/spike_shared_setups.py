@@ -102,6 +102,7 @@ SETUP_FLAG_DEFS: tuple[SetupFlagDef, ...] = (
     ),
     SetupFlagDef("rsi_40_60", "RSI between 40 and 60", ("rsi_14",)),
     SetupFlagDef("rsi_45_65", "RSI between 45 and 65", ("rsi_14",)),
+    SetupFlagDef("rsi_le_70", "RSI at or below 70 (not blowoff overbought)", ("rsi_14",)),
     SetupFlagDef(
         "rsi_cross_up_50",
         "RSI crossed up through 50 (was below, now at/above)",
@@ -146,6 +147,11 @@ SETUP_FLAG_DEFS: tuple[SetupFlagDef, ...] = (
     ),
     SetupFlagDef("gap_gt_0", "Rotation Gap > 0", ("Rotation_Gap",)),
     SetupFlagDef("gap_gt_10", "Rotation Gap > 10", ("Rotation_Gap",)),
+    SetupFlagDef(
+        "gap_gt_m10",
+        "Rotation Gap > -10 (not terribly negative; optional soft filter)",
+        ("Rotation_Gap",),
+    ),
     SetupFlagDef(
         "compression_recovering",
         "Compression low then volume/price scores rising",
@@ -229,6 +235,7 @@ def build_setup_flags(
     out["macd_hist_pos_rising"] = (macd > 0) & (macd > macd_prev)
     out["rsi_40_60"] = (rsi >= 40) & (rsi <= 60)
     out["rsi_45_65"] = (rsi >= 45) & (rsi <= 65)
+    out["rsi_le_70"] = rsi <= 70
     out["rsi_cross_up_50"] = (rsi_prev < 50) & (rsi >= 50)
     out["bb_pctb_mid_upper"] = (bb_pct >= 0.4) & (bb_pct <= 0.9)
     out["bb_bandwidth_expanding"] = bbw > bbw_prev
@@ -253,9 +260,11 @@ def build_setup_flags(
     if "Rotation_Gap" in df.columns and gap.notna().any():
         out["gap_gt_0"] = gap > 0
         out["gap_gt_10"] = gap > 10
+        out["gap_gt_m10"] = gap > -10
     else:
         out["gap_gt_0"] = False
         out["gap_gt_10"] = False
+        out["gap_gt_m10"] = False
 
     # Compression recovering: score_C low (<45) and V or P rising
     if all(c in df.columns for c in ("score_C", "score_V", "score_P")) and sc.notna().any():
