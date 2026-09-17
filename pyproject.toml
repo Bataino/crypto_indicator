@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cmram"
+version = "0.1.0"
+description = "Crypto Micro-Cap Rotation Alpha Model — Phase 1 research scaffold"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pandas",
+    "numpy",
+    "scipy",
+    "httpx",
+    "pydantic-settings",
+    "duckdb",
+    "pyarrow",
+    "pyyaml",
+    "pytrends",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = ["integration: live API / network tests"]
+

@@ -1,0 +1,31 @@
+# Data artifacts (keep directory structure via .gitkeep)
+data/**
+!data/**/.gitkeep
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Env / secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*secret*
+*credentials*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp

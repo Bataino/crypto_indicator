@@ -1,0 +1,101 @@
+# CMRAM social / Narrative Acceleration (N) — V0.1
+# Research proxies only. No claimed alpha. Prefer free sources; never commit secrets.
+
+enabled: true
+# Sources tried in order; N lands if ANY source returns series for an asset.
+# Santiment (free) adds social_volume_total when slug maps; ~30d lag on FREE.
+sources:
+  trends:
+    enabled: true
+    timeframe: "today 3-m"   # daily resolution on Google Trends
+    sleep_s: 10.0            # polite spacing between keywords
+    hl: en-US
+    tz: 0
+    # keyword template: {symbol}, {name}, {asset_id}
+    keyword_template: "{name}"
+    # Ambiguous / short tickers → force "{symbol} crypto" or custom string
+    # Disambiguation aliases for assets that otherwise return no useful series.
+    # These are research queries, not ticker recommendations.
+    keyword_overrides:
+      flock-2: "FLOCK crypto"
+      g-token: "Gravity Galxe"
+      lagrange: "Lagrange crypto"
+      metal: "Metal DAO"
+      sonic-3: "Sonic blockchain"
+      sophon: "Sophon blockchain"
+      vethor-token: "VeThor Token"
+  reddit:
+    enabled: true
+    sleep_s: 2.0
+    # public JSON first; PRAW if REDDIT_CLIENT_ID + REDDIT_CLIENT_SECRET set
+    search_limit: 100
+    lookback_days: 90
+    query_template: "{name} OR {symbol}"
+  x:
+    enabled: true
+    # Requires TWITTER_BEARER_TOKEN or X_BEARER_TOKEN; otherwise stubbed.
+    # Default is cheap mention COUNTS (not tweet text). Search is opt-in / expensive.
+    mode: counts             # counts | search (search pulls actual posts)
+    sleep_s: 1.0
+    lookback_days: 7         # Counts: Recent / Search: Recent window (~7 days)
+    granularity: day         # counts endpoint grouping
+    query_template: "({name} OR ${symbol}) (crypto OR coin OR token) -is:retweet"
+    max_assets: 40           # hard asset cap this batch (null = all eligible)
+    # Spend guard. estimated = n_assets × requests_per_asset × cost_per_request_usd
+    # Counts: 1 request/asset. Search: search.max_pages requests/asset (default 1).
+    # cost_per_request_usd is a documented estimate — X developer console price WINS
+    # if it differs. Update this number from the console; do not assume it is frozen.
+    estimated_cost_cap_usd: 1.00
+    cost_per_request_usd: 0.005   # Counts: Recent ~$0.005/req as of config write
+    search:
+      # EXPENSIVE opt-in — pulls actual posts. Default 1 page. Prefer mode: counts.
+      max_pages: 1
+      max_results: 10        # X recent-search min 10, max 100
+      cost_per_request_usd: 0.005  # may under-estimate if X bills per post; console wins
+  wikipedia:
+    # Optional free daily pageviews when a wiki title is mapped
+    enabled: true
+    sleep_s: 0.25
+    project: en.wikipedia
+    # asset_id → article title (underscores). Empty = skip unless opensearch finds one.
+    title_overrides:
+      helium: Helium_(cryptocurrency)
+      the-sandbox: The_Sandbox_(video_game)
+      astar: Astar_Network
+      ordinals: Ordinals
+      zilliqa: Zilliqa
+      ark: Ark_(blockchain)
+      civic: Civic_(identity_platform)
+      coti: COTI
+      gala: Gala_Games
+      steem: Steem_(cryptocurrency)
+
+  santiment:
+    # Free-plan GraphQL social volume (social_volume_total). Attention proxy — not alpha.
+    # Auth: SANTIMENT_API_KEY (env or box-secrets card). Never log the key.
+    # Limits (typical FREE): ~1000 calls/mo, ~1y history, ~30d lag on restricted metrics.
+    enabled: true
+    metric: social_volume_total
+    sleep_s: 0.35
+    call_budget: 150          # soft session cap; leave monthly headroom
+    max_assets: null          # null = all mapped; set int for smoke
+    # CoinGecko asset_id → Santiment slug when auto-map is ambiguous / wrong
+    slug_overrides:
+      flock-2: flock-io
+      g-token: gravity-token
+      gala: gala-v2
+      holoworld: holoworld-ai
+      ordinals: ordi
+      pha: phala-network
+      power-protocol: powerprotocol
+      saga-2: saga
+      skyai: bnb-skyai
+      sonic-3: sonic
+      thena: bnb-thena
+      unifai-network: bnb-unifai-network
+
+# Attention floor before log / ratios (same role as volume_floor_usd)
+attention_floor: 0.1
+
+# When multiple sources overlap on (date, asset), combine with this method
+combine: mean   # mean | sum | max

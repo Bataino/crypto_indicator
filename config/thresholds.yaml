@@ -1,0 +1,48 @@
+# CMRAM signal / liquidity thresholds — DRAFT for calibration
+# Do NOT treat these as validated alpha parameters.
+# Status: calibration TBD (DE Spec V0.1 §7, §9)
+
+calibration_status: TBD
+
+# MREI threshold grid (τ_m) — draft candidates
+tau_m:
+  - 50
+  - 60
+  - 70
+
+# Rotation Gap threshold grid (τ_g) — draft from research examples
+tau_g:
+  - 20
+  - 30
+  - 40
+  - 50
+
+# Liquidity: 20d median USD volume minimum — V_min candidates
+# Calibrate; do not freeze without holdout confirmation.
+v_min_usd:
+  - 50_000
+  - 100_000
+  - 250_000
+
+# Amihud ILLIQ_max: set from cross-sectional percentiles later
+# e.g. exclude worst 20% — TBD
+amihud:
+  lookback_days: 20
+  illiq_max_percentile: null  # TBD — e.g. 80 means exclude worst 20%
+  calibration_status: TBD
+
+# Forward return horizons (days)
+horizons_days:
+  - 1
+  - 3
+  - 7
+  - 14
+  - 21
+  - 30
+
+# Models to evaluate (A/B; C when social/N available)
+models:
+  - A  # price only
+  - B  # price + volume
+  - C  # + narrative (N) when n_available
+  # - D  # full Gap (deferred / partial without N)

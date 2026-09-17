@@ -1,0 +1,24 @@
+# CMRAM universe bands — locked per DE Spec V0.1 §2
+# Point-in-time market-cap membership; bands evaluated separately.
+
+min_history_days: 90
+
+bands:
+  A_5_50:
+    label: "Band A"
+    market_cap_min_usd: 5_000_000
+    market_cap_max_usd: 50_000_000
+  B_10_100:
+    label: "Band B"
+    market_cap_min_usd: 10_000_000
+    market_cap_max_usd: 100_000_000
+
+# Entry convention (proposed, locked for Phase 1 scaffold)
+entry_convention: next_day_open
+
+# Social narrative deferred until Models A/B work
+social_enabled: false
+
+# Non-strategy asset filter (tokenized stocks, stables/FX, …).
+# Rules live in config/eligibility.yaml (deny ids / categories / keywords).
+eligibility_config: eligibility.yaml

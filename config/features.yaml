@@ -1,0 +1,63 @@
+# CMRAM feature lookbacks and scoring knobs — Phase 1 Models A/B/C
+# All windows are backward-looking (inclusive of t). No magic numbers in code only.
+# These are research definitions, not validated alpha parameters.
+
+model_version: features_v0.1
+models:
+  - A  # P + price/momentum NSI
+  - B  # C+V+P partial MREI + price/volume NSI
+  - C  # C+V+P+N when social present (n_available)
+
+# Flag rows when the (timestamp, band) cross-section has fewer assets than this.
+# Current DuckDB n=3 is well below; CS percentiles are coarse (0/50/100).
+small_sample_n: 10
+
+# Volume floor (USD) before ratios / log — avoids log(0) and /0.
+volume_floor_usd: 1.0
+
+# Clip RVOL before ranking so climax outliers do not dominate V
+# (extreme volume is an NSI exhaustion input instead).
+rvol_clip: 10.0
+
+# Prefer these market_daily.asset_id values as the RS benchmark when present.
+btc_asset_ids:
+  - bitcoin
+
+# Social attention floor / combine (see config/social.yaml for ingest)
+attention_floor: 0.1
+social_combine: mean
+
+lookbacks:
+  # Compression C
+  high_days: 20
+  range_short_days: 10
+  range_long_days: 40
+  vol_short_days: 7
+  vol_long_days: 30
+  sell_short_days: 5
+  sell_long_days: 20
+  stabilize_short_days: 5
+  stabilize_long_days: 20
+  # Volume V
+  rvol_short_days: 3
+  rvol_long_days: 30
+  vol_growth_short_days: 7
+  vol_growth_long_days: 28
+  velocity_days: 3
+  logvol_accel_days: 7
+  # Price P
+  ret_short_days: 3
+  ret_medium_days: 7
+  rs_short_days: 7
+  rs_long_days: 14
+  higher_lows_short_days: 10
+  higher_lows_long_days: 20
+  breakout_days: 20
+  # NSI legs
+  sma_days: 20
+  extension_days: 14
+  mom_dec_days: 7
+  # Narrative N (attention velocity / acceleration)
+  n_vel_short_days: 7
+  n_vel_long_days: 28
+  n_accel_days: 7

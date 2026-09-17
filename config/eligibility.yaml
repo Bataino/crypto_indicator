@@ -1,0 +1,64 @@
+# CMRAM universe eligibility — exclude non-strategy assets from Band A/B.
+# Research data-quality filter only; not a trading signal.
+# Prefer CoinGecko categories when present on assets.category; else heuristics.
+
+enabled: true
+
+# Exact asset_id denylist (CoinGecko ids)
+deny_ids:
+  - usd-coinvertible
+  - eurite
+  - f-x-protocol-fxusd
+  - royal-euro
+  - unitas
+  - fidelity-digital-dollar
+  - nvidia-bstocks
+  - spacex-bstocks-tokenized-stock
+  - alphabet-class-a-ondo-tokenized-stock
+  - sandisk-bstocks-tokenized-stock
+  - circle-xstock
+  - circle-internet-group-bstock
+
+# CoinGecko category strings (matched case-insensitive; exact or contained)
+deny_categories:
+  - stablecoins
+  - usd-stablecoin
+  - eur-stablecoin
+  - fiat-backed
+  - tokenized-stock
+  - tokenized-stocks
+  - tokenized-assets
+  - wrapped-fiat
+
+# Substrings matched against asset_id, symbol, and name (case-insensitive)
+deny_keywords:
+  - tokenized stock
+  - tokenized-stock
+  - ondo tokenized
+  - ondo-tokenized
+  - xstock
+  - bstock
+  - bstocks
+  - stablecoin
+  - fiat-backed
+  - fiat backed
+  - wrapped fiat
+  - wrapped-fiat
+  - coinvertible
+  - digital-dollar
+  - digital dollar
+  - fxusd
+
+# asset_id substring patterns (case-insensitive)
+deny_id_substrings:
+  - -xstock
+  - -bstock
+  - bstocks
+  - tokenized-stock
+  - -ondo-tokenized
+  - coinvertible
+  - digital-dollar
+  - fxusd
+
+# Optional allowlist overrides denylist (empty = unused)
+allow_ids: []
