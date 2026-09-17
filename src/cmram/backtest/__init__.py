@@ -8,6 +8,8 @@ from cmram.backtest.holdout import (
 )
 from cmram.backtest.persist import build_and_write_backtest
 from cmram.backtest.n_only_validation import run_n_only_validation
+from cmram.backtest.spike_detect import detect_spikes, forward_max_return
+from cmram.backtest.spike_backward import run_spike_backward, write_spike_backward_report
 
 __all__ = [
     "run_backtest",
@@ -17,4 +19,8 @@ __all__ = [
     "run_holdout_evaluation",
     "write_holdout_report",
     "run_n_only_validation",
+    "detect_spikes",
+    "forward_max_return",
+    "run_spike_backward",
+    "write_spike_backward_report",
 ]
