@@ -3,7 +3,7 @@
 Point-in-time: every rolling window and the band equal-weight RS benchmark
 use only bars and membership available at t. Cross-sectional percentiles
 are within ``(timestamp, band)``. Models A/B unchanged; Model C adds N when
-social_daily is present (``n_available=true`` only on rows with N).
+social_daily is present; Model E is N-only (Gap vs social saturation) (``n_available=true`` only on rows with N).
 
 This stage does **not** generate signals or claim predictive power.
 """
@@ -99,7 +99,7 @@ def compute_features_daily(
     cfg = resolve_feature_config(config)
     lb = cfg["lookbacks"]
     version = model_version or cfg["model_version"]
-    models = [m for m in cfg["models"] if m in ("A", "B", "C")]
+    models = [m for m in cfg["models"] if m in ("A", "B", "C", "E")]
     if not models:
         models = ["A", "B"]
 
@@ -147,6 +147,7 @@ def compute_features_daily(
             lookbacks=lb,
             combine=str(cfg.get("social_combine") or "mean"),
             attention_floor=float(cfg.get("attention_floor") or 0.1),
+            narrative_mode=str(cfg.get("narrative_mode") or "quiet_rising"),
         )
         if len(raw_n):
             raw_n = raw_n.copy()
@@ -225,6 +226,20 @@ def compute_features_daily(
             part["NSI"] = mean_available(
                 part, ["nsi_price_ext", "nsi_vol_exh", "nsi_mom_dec"]
             )
+        elif model == "E":
+            # Model E (N-only): signal from N / Gap vs social saturation.
+            # MREI := score_N; NSI := nsi_social (crowded baseline).
+            # C/V/P and price/volume/mom NSI legs unused. Optional light
+            # liquidity gate is applied later at signal time (membership
+            # liquidity_pass only) — documented in report.
+            part["score_C"] = np.nan
+            part["score_V"] = np.nan
+            part["score_P"] = np.nan
+            part["nsi_price_ext"] = np.nan
+            part["nsi_vol_exh"] = np.nan
+            part["nsi_mom_dec"] = np.nan
+            part["MREI"] = part["score_N"].where(part["n_available"])
+            part["NSI"] = part["nsi_social"].where(part["n_available"])
         else:
             # Model C: C+V+P+N when n_available; else renormalize without N.
             part["MREI"] = compute_mrei(
@@ -255,6 +270,7 @@ def compute_features_daily(
     result.attrs["rs_benchmark"] = rs_benchmark
     result.attrs["small_sample_n"] = int(cfg["small_sample_n"])
     result.attrs["model_version"] = version
+    result.attrs["narrative_mode"] = str(cfg.get("narrative_mode") or "quiet_rising")
     return result
 
 

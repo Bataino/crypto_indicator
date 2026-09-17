@@ -91,10 +91,11 @@ def _membership(market: pd.DataFrame, *, from_idx: int, bands: tuple[str, ...] =
 
 def test_features_config_loads():
     cfg = load_features_config()
-    assert cfg["model_version"] == "features_v0.1"
-    assert cfg["models"] == ["A", "B", "C"]
+    assert cfg["model_version"] == "features_v0.1_quiet_n"
+    assert cfg["models"] == ["A", "B", "C", "E"]
     assert cfg["lookbacks"]["range_long_days"] == 40
     assert cfg["small_sample_n"] == 10
+    assert cfg.get("narrative_mode") == "quiet_rising"
 
 
 def test_cs_percentile_n1_and_ties_and_n3():

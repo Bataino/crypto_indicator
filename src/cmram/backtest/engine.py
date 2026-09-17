@@ -205,19 +205,58 @@ def _band_ew_forward(
     *,
     chart_close_only: bool,
 ) -> float | None:
+    return _band_stat_forward(
+        bars_by_asset,
+        members,
+        entry_ts,
+        horizon,
+        chart_close_only=chart_close_only,
+        stat="mean",
+    )
+
+
+def _band_stat_forward(
+    bars_by_asset: dict[str, pd.DataFrame],
+    members: list[str],
+    entry_ts: pd.Timestamp,
+    horizon: int,
+    *,
+    chart_close_only: bool,
+    stat: str = "mean",
+    exclude: str | None = None,
+    fwd_ret_fn=None,
+) -> float | None:
+    """Equal-weight mean or median of same-band member forward returns.
+
+    Used for ``market`` (EW mean fallback), ``group_mean``, and ``group_median``.
+    By default includes all members with a completable path; pass ``exclude`` to
+    drop the signal asset from the peer group.
+
+    ``fwd_ret_fn(asset, entry_ts, horizon) -> float|None`` optional cache-aware
+    lookup (avoids re-walking bars for every signal sharing a day/band).
+    """
     rets = []
     for a in members:
-        bars = bars_by_asset.get(a)
-        if bars is None:
+        if exclude is not None and a == exclude:
             continue
-        r, _, _ = _forward_path(
-            bars, entry_ts, horizon, chart_close_only=chart_close_only
-        )
+        if fwd_ret_fn is not None:
+            r = fwd_ret_fn(a, entry_ts, horizon)
+        else:
+            bars = bars_by_asset.get(a)
+            if bars is None:
+                continue
+            r, _, _ = _forward_path(
+                bars, entry_ts, horizon, chart_close_only=chart_close_only
+            )
         if r is not None and np.isfinite(r):
-            rets.append(r)
+            rets.append(float(r))
     if not rets:
         return None
-    return float(np.mean(rets))
+    if stat == "median":
+        return float(np.median(rets))
+    if stat == "mean":
+        return float(np.mean(rets))
+    raise ValueError(f"unknown band forward stat: {stat}")
 
 
 def run_backtest(
@@ -227,6 +266,7 @@ def run_backtest(
     horizons_days: list[int] | None = None,
     benchmarks: list[str] | None = None,
     random_seed: int = 42,
+    random_seeds: list[int] | None = None,
     universe_membership: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Compute per-signal forward ret / MFE / MAE and excess vs benchmarks.
@@ -235,6 +275,10 @@ def run_backtest(
 
     For each signal × horizon × benchmark, one row with signal ``ret``/MFE/MAE
     and ``excess_ret = ret − benchmark_ret`` (NaN if bench unavailable).
+
+    When ``random_seeds`` is provided and ``random`` is among benchmarks, the
+    random benchmark is averaged across seeds: for each signal×horizon the
+    mean of per-seed excesses is stored (deterministic; secondary robustness).
 
     Returns:
         DataFrame matching ``backtest_results`` columns. attrs include
@@ -296,8 +340,52 @@ def run_backtest(
     # BTC presence
     has_btc = "bitcoin" in bars_by_asset
 
-    rng = np.random.default_rng(int(random_seed))
+    seeds = (
+        [int(s) for s in random_seeds]
+        if random_seeds is not None and len(random_seeds) > 0
+        else [int(random_seed)]
+    )
+    multi_random = "random" in benches and len(seeds) > 1
+    rng = np.random.default_rng(int(seeds[0]))
+    # Independent RNGs per seed for averaged random benchmark
+    rngs = [np.random.default_rng(int(s)) for s in seeds]
     rows: list[dict[str, Any]] = []
+    out.attrs["random_seeds"] = list(seeds)
+
+    # Cache forward paths: (asset, entry_ts, h) -> (ret, mfe, mae)
+    # and group stats: (members_tuple, entry_ts, h) -> (mean, median)
+    fwd_cache: dict[tuple[str, pd.Timestamp, int], tuple[float | None, float | None, float | None]] = {}
+    group_cache: dict[tuple[tuple[str, ...], pd.Timestamp, int], tuple[float | None, float | None]] = {}
+
+    def _cached_fwd(asset_id: str, ets: pd.Timestamp, h: int):
+        key = (asset_id, ets, int(h))
+        if key not in fwd_cache:
+            bars = bars_by_asset.get(asset_id)
+            if bars is None:
+                fwd_cache[key] = (None, None, None)
+            else:
+                fwd_cache[key] = _forward_path(
+                    bars, ets, int(h), chart_close_only=chart_only
+                )
+        return fwd_cache[key]
+
+    def _cached_fwd_ret(asset_id: str, ets: pd.Timestamp, h: int) -> float | None:
+        r, _, _ = _cached_fwd(asset_id, ets, h)
+        return r
+
+    def _cached_group_stats(members_list: list[str], ets: pd.Timestamp, h: int):
+        key = (tuple(members_list), ets, int(h))
+        if key not in group_cache:
+            rets = []
+            for a in members_list:
+                r = _cached_fwd_ret(a, ets, h)
+                if r is not None and np.isfinite(r):
+                    rets.append(float(r))
+            if not rets:
+                group_cache[key] = (None, None)
+            else:
+                group_cache[key] = (float(np.mean(rets)), float(np.median(rets)))
+        return group_cache[key]
 
     for sig in signals.itertuples(index=False):
         signal_id = str(sig.signal_id)
@@ -317,10 +405,18 @@ def run_backtest(
 
         # Pre-pick benchmarks once per signal (same for all horizons)
         bench_assets: dict[str, str | None] = {}
+        random_picks: list[str | None] = []
         if "random" in benches:
-            bench_assets["random"] = _pick_random(
-                members, exclude=asset, rng=rng
-            )
+            if multi_random:
+                random_picks = [
+                    _pick_random(members, exclude=asset, rng=r) for r in rngs
+                ]
+                # Keep first pick as a representative for single-row path when needed
+                bench_assets["random"] = random_picks[0]
+            else:
+                bench_assets["random"] = _pick_random(
+                    members, exclude=asset, rng=rng
+                )
         if "momentum" in benches:
             bench_assets["momentum"] = _pick_top(
                 ret7_by_day.get(asof, pd.DataFrame()),
@@ -346,44 +442,46 @@ def run_backtest(
                 )
         # market handled specially (BTC or EW)
 
-        asset_bars = bars_by_asset.get(asset)
-        if asset_bars is None:
+        if asset not in bars_by_asset:
             continue
 
+        need_group = ("group_mean" in benches) or ("group_median" in benches) or (
+            "market" in benches and not has_btc
+        )
+
         for h in horizons:
-            ret, mfe, mae = _forward_path(
-                asset_bars, entry_ts, int(h), chart_close_only=chart_only
-            )
+            ret, mfe, mae = _cached_fwd(asset, entry_ts, int(h))
             if ret is None:
                 continue
+
+            g_mean = g_med = None
+            if need_group:
+                g_mean, g_med = _cached_group_stats(members, entry_ts, int(h))
 
             for bname in benches:
                 bench_ret: float | None = None
                 if bname == "market":
                     if has_btc:
-                        bench_ret, _, _ = _forward_path(
-                            bars_by_asset["bitcoin"],
-                            entry_ts,
-                            int(h),
-                            chart_close_only=chart_only,
-                        )
+                        bench_ret, _, _ = _cached_fwd("bitcoin", entry_ts, int(h))
                     else:
-                        bench_ret = _band_ew_forward(
-                            bars_by_asset,
-                            members,
-                            entry_ts,
-                            int(h),
-                            chart_close_only=chart_only,
-                        )
+                        bench_ret = g_mean
+                elif bname == "group_mean":
+                    bench_ret = g_mean
+                elif bname == "group_median":
+                    bench_ret = g_med
+                elif bname == "random" and multi_random:
+                    seed_rets: list[float] = []
+                    for ba in random_picks:
+                        if ba is None:
+                            continue
+                        br = _cached_fwd_ret(ba, entry_ts, int(h))
+                        if br is not None and np.isfinite(br):
+                            seed_rets.append(float(br))
+                    bench_ret = float(np.mean(seed_rets)) if seed_rets else None
                 else:
                     ba = bench_assets.get(bname)
-                    if ba is not None and ba in bars_by_asset:
-                        bench_ret, _, _ = _forward_path(
-                            bars_by_asset[ba],
-                            entry_ts,
-                            int(h),
-                            chart_close_only=chart_only,
-                        )
+                    if ba is not None:
+                        bench_ret = _cached_fwd_ret(ba, entry_ts, int(h))
 
                 excess = (
                     float(ret - bench_ret)

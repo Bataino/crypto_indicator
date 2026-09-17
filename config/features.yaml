@@ -2,11 +2,18 @@
 # All windows are backward-looking (inclusive of t). No magic numbers in code only.
 # These are research definitions, not validated alpha parameters.
 
-model_version: features_v0.1
+model_version: features_v0.1_quiet_n
 models:
   - A  # P + price/momentum NSI
   - B  # C+V+P partial MREI + price/volume NSI
   - C  # C+V+P+N when social present (n_available)
+  - E  # N-only: MREI=score_N, NSI=social saturation, Gap=N−saturation
+
+# Narrative N redesign (keep legacy via narrative_mode: legacy)
+narrative_mode: quiet_rising   # quiet_rising | legacy
+n_crowd_scale: 10.0            # mention units: ~quiet below this scale
+n_crowd_exp: 3.0               # steeper → stronger damp as lagged baseline rises
+n_crowd_hard_max: 80.0         # hard-zero quiet weight when lagged baseline > this
 
 # Flag rows when the (timestamp, band) cross-section has fewer assets than this.
 # Current DuckDB n=3 is well below; CS percentiles are coarse (0/50/100).
@@ -61,3 +68,7 @@ lookbacks:
   n_vel_short_days: 7
   n_vel_long_days: 28
   n_accel_days: 7
+  # quiet→rising knobs (also settable at top-level; mirrored into lookbacks)
+  n_crowd_scale: 10.0
+  n_crowd_exp: 3.0
+  n_crowd_hard_max: 80.0

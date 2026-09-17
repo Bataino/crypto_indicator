@@ -44,7 +44,11 @@ DEFAULT_VOLUME_FLOOR_USD = 1.0
 DEFAULT_RVOL_CLIP = 10.0
 DEFAULT_BTC_ASSET_IDS = ("bitcoin",)
 DEFAULT_MODEL_VERSION = "features_v0.1"
-DEFAULT_MODELS = ("A", "B", "C")
+DEFAULT_MODELS = ("A", "B", "C", "E")
+DEFAULT_NARRATIVE_MODE = "quiet_rising"
+DEFAULT_N_CROWD_EXP = 3.0
+DEFAULT_N_CROWD_SCALE = 10.0
+DEFAULT_N_CROWD_HARD_MAX = 80.0
 
 
 def resolve_feature_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -65,6 +69,21 @@ def resolve_feature_config(config: dict[str, Any] | None = None) -> dict[str, An
 
     lookbacks = dict(DEFAULT_LOOKBACKS)
     lookbacks.update(yaml_cfg.get("lookbacks") or {})
+    # Surface narrative mode knobs inside lookbacks for narrative_inputs
+    _mode = str(yaml_cfg.get("narrative_mode") or DEFAULT_NARRATIVE_MODE).strip().lower()
+    lookbacks.setdefault("narrative_mode", _mode)
+    if yaml_cfg.get("n_crowd_exp") is not None:
+        lookbacks["n_crowd_exp"] = float(yaml_cfg["n_crowd_exp"])
+    else:
+        lookbacks.setdefault("n_crowd_exp", DEFAULT_N_CROWD_EXP)
+    if yaml_cfg.get("n_crowd_scale") is not None:
+        lookbacks["n_crowd_scale"] = float(yaml_cfg["n_crowd_scale"])
+    else:
+        lookbacks.setdefault("n_crowd_scale", DEFAULT_N_CROWD_SCALE)
+    if yaml_cfg.get("n_crowd_hard_max") is not None:
+        lookbacks["n_crowd_hard_max"] = float(yaml_cfg["n_crowd_hard_max"])
+    else:
+        lookbacks.setdefault("n_crowd_hard_max", DEFAULT_N_CROWD_HARD_MAX)
 
     btc_ids = yaml_cfg.get("btc_asset_ids") or list(DEFAULT_BTC_ASSET_IDS)
     models = yaml_cfg.get("models") or list(DEFAULT_MODELS)
@@ -90,4 +109,22 @@ def resolve_feature_config(config: dict[str, Any] | None = None) -> dict[str, An
             else 0.1
         ),
         "social_combine": str(yaml_cfg.get("social_combine") or "mean"),
+        "narrative_mode": str(
+            yaml_cfg.get("narrative_mode") or DEFAULT_NARRATIVE_MODE
+        ).strip().lower(),
+        "n_crowd_exp": float(
+            yaml_cfg.get("n_crowd_exp")
+            if yaml_cfg.get("n_crowd_exp") is not None
+            else DEFAULT_N_CROWD_EXP
+        ),
+        "n_crowd_scale": float(
+            yaml_cfg.get("n_crowd_scale")
+            if yaml_cfg.get("n_crowd_scale") is not None
+            else DEFAULT_N_CROWD_SCALE
+        ),
+        "n_crowd_hard_max": float(
+            yaml_cfg.get("n_crowd_hard_max")
+            if yaml_cfg.get("n_crowd_hard_max") is not None
+            else DEFAULT_N_CROWD_HARD_MAX
+        ),
     }

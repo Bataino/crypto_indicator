@@ -31,9 +31,11 @@ DEFAULT_MIN_N_TOP = 20
 PREREGISTERED_CELLS: tuple[dict[str, Any], ...] = (
     {"model": "B", "tau_m": 50.0, "tau_g": 20.0, "label": "prereg_B_50_20"},
     {"model": "C", "tau_m": 50.0, "tau_g": 20.0, "label": "prereg_C_50_20"},
+    {"model": "E", "tau_m": 50.0, "tau_g": 20.0, "label": "prereg_E_50_20"},
 )
 # Explore peek for holdout nomination is restricted to this model (N hypothesis).
-EXPLORE_TOP_MODEL = "C"
+# Prefer N-only (E) when present; fall back handled by top_explore_cell filter.
+EXPLORE_TOP_MODEL = "E"
 
 
 def membership_calendar_dates(membership: pd.DataFrame) -> list[pd.Timestamp]:
@@ -440,6 +442,8 @@ def run_holdout_evaluation(
     horizons_days: list[int] | None = None,
     benchmarks: list[str] | None = None,
     random_seed: int = 42,
+    bands: Sequence[str] | None = None,
+    models: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Explore/holdout pipeline using existing backtest engine.
 
@@ -461,7 +465,17 @@ def run_holdout_evaluation(
     split = compute_time_split(dates, explore_frac=explore_frac)
     cut = split["cut_date"]
 
-    sig_explore, sig_holdout = split_signals_by_cut(signals, cut)
+    # Optional lighter holdout: restrict bands / models before split work
+    sig_all = signals
+    if bands is not None:
+        allowed_b = {str(b) for b in bands}
+        sig_all = sig_all[sig_all["band"].astype(str).isin(allowed_b)].copy()
+        membership = membership[membership["band"].astype(str).isin(allowed_b)].copy()
+    if models is not None:
+        allowed_m = {str(m) for m in models}
+        sig_all = sig_all[sig_all["model"].astype(str).isin(allowed_m)].copy()
+
+    sig_explore, sig_holdout = split_signals_by_cut(sig_all, cut)
 
     # Explore: full τ grid (all models/τ) at lean horizons/benchmarks
     bt_explore = run_backtest(
@@ -479,8 +493,13 @@ def run_holdout_evaluation(
     explore_grid_by_band = summarize_tau_grid_h7(
         sig_explore, bt_explore, horizon_d=HOLDOUT_HORIZON, pool_bands=False
     )
+    peek_models = (EXPLORE_TOP_MODEL,)
+    if models is not None:
+        # Prefer E then C among the requested model subset for the N peek
+        req = [str(m) for m in models]
+        peek_models = tuple(m for m in ("E", "C") if m in req) or tuple(req)
     explore_top = top_explore_cell(
-        explore_grid, models=(EXPLORE_TOP_MODEL,)
+        explore_grid, models=peek_models
     )
     cells = build_holdout_cell_set(explore_top)
 
@@ -543,6 +562,8 @@ def run_holdout_evaluation(
         "horizons_days": horizons,
         "benchmarks": benches,
         "random_seed": random_seed,
+        "filter_bands": list(bands) if bands is not None else None,
+        "filter_models": list(models) if models is not None else None,
     }
 
 

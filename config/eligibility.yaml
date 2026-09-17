@@ -18,6 +18,10 @@ deny_ids:
   - sandisk-bstocks-tokenized-stock
   - circle-xstock
   - circle-internet-group-bstock
+  - jupusd
+  - straitsx-xusd
+  - metronome-synth-usd
+  - jpycoin
 
 # CoinGecko category strings (matched case-insensitive; exact or contained)
 deny_categories:
@@ -48,6 +52,15 @@ deny_keywords:
   - digital-dollar
   - digital dollar
   - fxusd
+  - robinhood-tokenized
+  - robinhood tokenized
+  - robinhood-token
+  - rstock
+  - backpack securities
+  - backpack-securities
+  - prestocks
+  - pre-ipo
+  - tokenised
 
 # asset_id substring patterns (case-insensitive)
 deny_id_substrings:
@@ -59,6 +72,12 @@ deny_id_substrings:
   - coinvertible
   - digital-dollar
   - fxusd
+  - robinhood-token
+  - robinhood-tokenized
+  - -rstock
+  - backpack-securities
+  - prestocks
+  - tokenised-
 
 # Optional allowlist overrides denylist (empty = unused)
 allow_ids: []

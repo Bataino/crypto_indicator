@@ -465,6 +465,14 @@ def ingest_coingecko(
         CoinGeckoError / RateLimitError: API failures — no fake prices written.
     """
     _ = kwargs  # forward-compatible
+    # Load API keys from env / box-secrets (never log values).
+    try:
+        from cmram.secrets_env import ensure_env_secrets
+
+        ensure_env_secrets(("COINGECKO_API_KEY",))
+    except Exception:  # noqa: BLE001 — ingest must still run if secrets helper fails
+        logger.debug("ensure_env_secrets skipped", exc_info=True)
+
     cfg = universe or load_universe_config()
     if min_bars is None:
         min_bars = int(cfg.get("min_history_days") or MIN_BARS_DEFAULT)
@@ -541,11 +549,43 @@ def ingest_coingecko(
                     "Try --full, raise --limit, or pass --ids."
                 )
 
+        # Apply universe eligibility (tokenized stocks / stables / FX) before fetch.
+        from cmram.config import load_eligibility_config
+        from cmram.universe.eligibility import evaluate_asset
+
+        elig_cfg = load_eligibility_config()
+        kept: list[dict[str, Any]] = []
+        elig_skipped: list[str] = []
+        for row in meta_rows:
+            aid = str(row.get("id") or "")
+            decision = evaluate_asset(
+                aid,
+                symbol=row.get("symbol"),
+                name=row.get("name"),
+                category=row.get("category") or row.get("categories"),
+                eligibility_config=elig_cfg,
+            )
+            if decision.eligible:
+                kept.append(row)
+            else:
+                elig_skipped.append(aid)
+                result.skipped_insufficient.append(
+                    f"{aid}:eligibility:{decision.reason_excluded or 'ineligible'}"
+                )
+        if elig_skipped:
+            logger.info(
+                "Eligibility excluded %s candidates before fetch (sample: %s)",
+                len(elig_skipped),
+                ", ".join(elig_skipped[:12]),
+            )
+        meta_rows = kept
+
         result.candidates = [str(r["id"]) for r in meta_rows]
         logger.info(
-            "CoinGecko candidates (%s): %s",
+            "CoinGecko candidates after eligibility (%s): %s",
             len(result.candidates),
-            ", ".join(result.candidates),
+            ", ".join(result.candidates[:40])
+            + ("..." if len(result.candidates) > 40 else ""),
         )
 
         stamp = _utc_now().strftime("%Y%m%dT%H%M%SZ")
@@ -561,7 +601,18 @@ def ingest_coingecko(
         asset_records: list[dict[str, Any]] = []
         now = _utc_now()
         already = existing_bar_counts(conn) if skip_existing else {}
-        n_db_ready = sum(1 for n in already.values() if n >= min_bars)
+        # Count only eligibility-passing assets toward --limit so denylisted
+        # stables/tokenized stocks already in DuckDB do not consume slots.
+        from cmram.config import load_eligibility_config as _load_elig
+        from cmram.universe.eligibility import evaluate_asset as _eval_asset
+
+        _elig = _load_elig()
+        n_db_ready = 0
+        for aid, n in already.items():
+            if n < min_bars:
+                continue
+            if _eval_asset(aid, eligibility_config=_elig).eligible:
+                n_db_ready += 1
         if skip_existing and limit is not None:
             remaining_slots = max(0, limit - n_db_ready)
         else:

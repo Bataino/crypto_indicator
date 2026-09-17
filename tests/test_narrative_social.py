@@ -100,7 +100,8 @@ def test_score_n_null_when_no_social():
 
 def test_narrative_inputs_velocity_accel_lowbase():
     social = _synth_social(["a", "b", "c"], n_days=60)
-    raw = narrative_inputs(social)
+    # legacy keeps signed velocity so rising>flat comparison is direct
+    raw = narrative_inputs(social, narrative_mode="legacy")
     assert not raw.empty
     for col in N_INPUT_COLS:
         assert col in raw.columns
@@ -600,3 +601,84 @@ def test_config_social_yaml_counts_defaults():
     assert x["estimated_cost_cap_usd"] == 1.00
     assert x["cost_per_request_usd"] == 0.005
     assert x["search"]["max_pages"] == 1
+
+
+def test_quiet_rising_damps_crowded_baseline():
+    """Quiet→rising: low-base riser beats already-crowded riser; legacy path still available."""
+    from datetime import date, timedelta
+
+    def _series(aid: str, base: float, rise: bool, n: int = 60):
+        rows = []
+        for i in range(n):
+            if rise and i > 25:
+                ment = base + 0.8 * (i - 25)
+            else:
+                ment = base + (0.0 if rise else 0.02 * i)
+            rows.append(
+                {
+                    "timestamp": date(2024, 1, 1) + timedelta(days=i),
+                    "asset_id": aid,
+                    "source": "santiment",
+                    "mentions": float(max(ment, 0.1)),
+                }
+            )
+        return rows
+
+    social = pd.DataFrame(
+        _series("quiet", 0.5, True)
+        + _series("crowd", 80.0, True)
+        + _series("flat", 5.0, False)
+    )
+    qr = narrative_inputs(social, narrative_mode="quiet_rising")
+    mid = qr[
+        (pd.to_datetime(qr["timestamp"]).dt.date >= date(2024, 2, 1))
+        & (pd.to_datetime(qr["timestamp"]).dt.date <= date(2024, 2, 15))
+    ]
+    q = mid.loc[mid["asset_id"] == "quiet", "n_vel_lowbase"].mean()
+    c = mid.loc[mid["asset_id"] == "crowd", "n_vel_lowbase"].mean()
+    f = mid.loc[mid["asset_id"] == "flat", "n_vel_lowbase"].mean()
+    assert q > c
+    assert q > f
+    assert mid.loc[mid["asset_id"] == "crowd", "n_quiet_weight"].mean() < 0.05
+
+    legacy = narrative_inputs(social, narrative_mode="legacy")
+    assert (legacy["narrative_mode"] == "legacy").all()
+    # legacy still assigns non-zero weight to crowded names
+    late = legacy[pd.to_datetime(legacy["timestamp"]).dt.date >= date(2024, 2, 20)]
+    assert late.loc[late["asset_id"] == "crowd", "n_vel_lowbase"].abs().mean() > 0
+
+
+def test_model_e_n_only_gap_vs_social_saturation():
+    market = _synth_market(["a", "b", "c"])
+    mem = _membership(market)
+    social = _synth_social(["a", "b", "c"], n_days=80)
+    cfg = {
+        "models": ["C", "E"],
+        "model_version": "test_e",
+        "narrative_mode": "quiet_rising",
+    }
+    feat = compute_features_daily(market, mem, social_daily=social, config=cfg)
+    assert set(feat["model"]) == {"C", "E"}
+    e = feat[feat["model"] == "E"]
+    assert e["score_C"].isna().all()
+    assert e["score_V"].isna().all()
+    assert e["score_P"].isna().all()
+    avail = e["n_available"].fillna(False).astype(bool)
+    assert avail.any()
+    # MREI is score_N; NSI is social saturation; Gap = N - saturation
+    assert np.allclose(
+        e.loc[avail, "MREI"].to_numpy(dtype=float),
+        e.loc[avail, "score_N"].to_numpy(dtype=float),
+        equal_nan=True,
+    )
+    assert np.allclose(
+        e.loc[avail, "NSI"].to_numpy(dtype=float),
+        e.loc[avail, "nsi_social"].to_numpy(dtype=float),
+        equal_nan=True,
+    )
+    gap = e.loc[avail, "MREI"] - e.loc[avail, "NSI"]
+    assert np.allclose(
+        e.loc[avail, "Rotation_Gap"].to_numpy(dtype=float),
+        gap.to_numpy(dtype=float),
+        equal_nan=True,
+    )

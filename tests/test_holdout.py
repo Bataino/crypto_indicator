@@ -103,8 +103,9 @@ def test_build_holdout_cell_set_adds_top_when_different():
     keys = {(c["model"], c["tau_m"], c["tau_g"]) for c in cells}
     assert ("B", 50.0, 20.0) in keys
     assert ("C", 50.0, 20.0) in keys
+    assert ("E", 50.0, 20.0) in keys
     assert ("C", 70.0, 40.0) in keys
-    assert len(cells) == 3
+    assert len(cells) == 4
 
 
 def test_build_holdout_cell_set_no_dup_when_top_is_prereg():
@@ -199,9 +200,9 @@ def test_summarize_tau_grid_h7_median_excess():
     assert grid.iloc[0]["median_excess"] == pytest.approx(0.01)
 
 
-def test_preregistered_cells_are_b_and_c():
+def test_preregistered_cells_include_b_c_e():
     models = {c["model"] for c in PREREGISTERED_CELLS}
-    assert models == {"B", "C"}
+    assert models == {"B", "C", "E"}
     assert all(c["tau_m"] == 50.0 and c["tau_g"] == 20.0 for c in PREREGISTERED_CELLS)
 
 

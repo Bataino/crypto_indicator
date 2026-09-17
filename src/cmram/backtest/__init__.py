@@ -7,6 +7,7 @@ from cmram.backtest.holdout import (
     write_holdout_report,
 )
 from cmram.backtest.persist import build_and_write_backtest
+from cmram.backtest.n_only_validation import run_n_only_validation
 
 __all__ = [
     "run_backtest",
@@ -15,4 +16,5 @@ __all__ = [
     "compute_time_split",
     "run_holdout_evaluation",
     "write_holdout_report",
+    "run_n_only_validation",
 ]

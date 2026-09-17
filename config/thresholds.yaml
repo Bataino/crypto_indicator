@@ -45,4 +45,5 @@ models:
   - A  # price only
   - B  # price + volume
   - C  # + narrative (N) when n_available
+  - E  # N-only (Gap vs social saturation; light liquidity gate only)
   # - D  # full Gap (deferred / partial without N)

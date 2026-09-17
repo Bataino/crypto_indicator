@@ -53,6 +53,18 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Skip writing explore/holdout cell parquet summaries.",
     )
+    p.add_argument(
+        "--bands",
+        type=str,
+        default=None,
+        help="Comma-separated bands for a lighter holdout (e.g. A_5_50).",
+    )
+    p.add_argument(
+        "--models",
+        type=str,
+        default=None,
+        help="Comma-separated models (e.g. C,E). Default: all in signals.",
+    )
     p.add_argument("-v", "--verbose", action="store_true", help="Debug logging.")
     return p.parse_args(argv)
 
@@ -95,6 +107,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # Lean by default: h=7 vs random (holdout peek metric). Full grid is slow.
+    bands = [b.strip() for b in args.bands.split(",") if b.strip()] if args.bands else None
+    models = [m.strip() for m in args.models.split(",") if m.strip()] if args.models else None
+    if bands:
+        print(f"  lighter_bands: {bands}")
+    if models:
+        print(f"  lighter_models: {models}")
     evaluation = run_holdout_evaluation(
         signals,
         market,
@@ -103,6 +121,8 @@ def main(argv: list[str] | None = None) -> int:
         horizons_days=[7],
         benchmarks=["random"],
         random_seed=args.seed,
+        bands=bands,
+        models=models,
     )
 
     split = evaluation["split"]
