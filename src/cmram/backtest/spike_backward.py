@@ -598,9 +598,11 @@ def write_spike_backward_report(
     now = datetime.now(LAGOS).strftime("%Y-%m-%d %H:%M %Z")
     s = result.summary
     split = result.split_info
+    thr = float(s.get("threshold", 0.5) or 0.5)
+    thr_label = f"+{100.0 * thr:.0f}%"
 
     lines: list[str] = []
-    lines.append("# Spike backward look — what came before +50% moves")
+    lines.append(f"# Spike backward look — what came before {thr_label} moves")
     lines.append("")
     lines.append(f"**When:** {now} (Africa/Lagos)")
     lines.append(
@@ -671,7 +673,7 @@ def write_spike_backward_report(
     )
     lines.append(
         f"2. Marked a **spike start day T** when the best close in the next "
-        f"{s.get('window', 7)} days was at least +50% above the close on T."
+        f"{s.get('window', 7)} days was at least {thr_label} above the close on T."
     )
     lines.append(
         "3. Removed overlapping spikes on the same coin (kept the earliest)."
@@ -685,8 +687,8 @@ def write_spike_backward_report(
         "non-spike days, and wrote 2–4 simple rules in plain English."
     )
     lines.append(
-        "6. Tested those rules **only** on the **later** period: do days that "
-        "match a rule hit +50% more often than the normal (base) rate?"
+        f"6. Tested those rules **only** on the **later** period: do days that "
+        f"match a rule hit {thr_label} more often than the normal (base) rate?"
     )
     lines.append("")
 
@@ -788,7 +790,7 @@ def write_spike_backward_report(
     lines.append("## Forward check (later period only)")
     lines.append("")
     lines.append(
-        f"Base rate on later eligible days (share that hit +50% within "
+        f"Base rate on later eligible days (share that hit {thr_label} within "
         f"{s.get('window', 7)}d): **{_fmt_pct(result.base_rate_validate)}**."
     )
     lines.append("")
