@@ -120,6 +120,21 @@ SETUP_FLAG_DEFS: tuple[SetupFlagDef, ...] = (
     SetupFlagDef("rvol_gt_1", "Relative volume > 1× 30d average", ("rvol_30",)),
     SetupFlagDef("rvol_gt_1_5", "Relative volume > 1.5× 30d average", ("rvol_30",)),
     SetupFlagDef(
+        "dist_ema20_le_10pct",
+        "Price not more than 10% above EMA20 (not already extended)",
+        ("dist_ema_20",),
+    ),
+    SetupFlagDef(
+        "dist_ema20_le_5pct",
+        "Price not more than 5% above EMA20 (not already extended)",
+        ("dist_ema_20",),
+    ),
+    SetupFlagDef(
+        "near_ema20_m5_p10",
+        "Price near EMA20 (between −5% and +10%)",
+        ("dist_ema_20",),
+    ),
+    SetupFlagDef(
         "reclaim_ema20_3d",
         "Price reclaimed EMA20 within the last 3 days",
         ("dist_ema_20",),
@@ -219,6 +234,9 @@ def build_setup_flags(
     out["bb_bandwidth_expanding"] = bbw > bbw_prev
     out["rvol_gt_1"] = rvol > 1.0
     out["rvol_gt_1_5"] = rvol > 1.5
+    out["dist_ema20_le_10pct"] = dist20 <= 0.10
+    out["dist_ema20_le_5pct"] = dist20 <= 0.05
+    out["near_ema20_m5_p10"] = (dist20 >= -0.05) & (dist20 <= 0.10)
 
     # Reclaim: crossed from <=0 to >0 on any of today / yesterday / day-before
     cross_t = (dist20_prev <= 0) & (dist20 > 0)
