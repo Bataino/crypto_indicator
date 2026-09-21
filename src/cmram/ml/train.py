@@ -347,6 +347,21 @@ def predict_proba_positive(model: Any, X: pd.DataFrame) -> np.ndarray:
     return np.asarray(proba[:, idx], dtype="float64")
 
 
+# Explore-only high-prob quantile cuts (never peek later when choosing).
+# Keys accepted by CLI / tune_threshold_explore.
+EXPLORE_QUANTILE_METHODS: dict[str, tuple[float, str]] = {
+    "top_quintile": (0.80, "top_quintile_explore_p80"),
+    "p80": (0.80, "explore_p80"),
+    "top_decile": (0.90, "top_decile_explore_p90"),
+    "p90": (0.90, "explore_p90"),
+    "top_5pct": (0.95, "top_5pct_explore_p95"),
+    "p95": (0.95, "explore_p95"),
+}
+
+# Default multi-band set for spike tighten fair-test (old p80 + tighter).
+DEFAULT_TIGHTEN_BANDS: tuple[str, ...] = ("p80", "p90", "p95")
+
+
 def tune_threshold_explore(
     y_true: np.ndarray,
     proba: np.ndarray,
@@ -356,9 +371,15 @@ def tune_threshold_explore(
     """Pick probability threshold on explore only (never later)."""
     y_true = np.asarray(y_true, dtype=int)
     proba = np.asarray(proba, dtype="float64")
-    if method == "top_quintile":
-        thr = float(np.quantile(proba, 0.80))
-        return thr, "top_quintile_explore_p80"
+    if method in EXPLORE_QUANTILE_METHODS:
+        q, name = EXPLORE_QUANTILE_METHODS[method]
+        thr = float(np.quantile(proba, q))
+        return thr, name
+    if method != "f1":
+        raise ValueError(
+            f"Unknown threshold method {method!r}; "
+            f"expected one of {sorted(EXPLORE_QUANTILE_METHODS)!r} or 'f1'"
+        )
     # F1 sweep on explore
     best_thr, best_f1 = 0.5, -1.0
     for q in np.linspace(0.50, 0.95, 19):
@@ -897,6 +918,514 @@ def write_phase_c_spike50_report(
 - No claim that the model “knows” the next spike  
 """
     path.write_text(body, encoding="utf-8")
+    return path
+
+
+
+@dataclass
+class HighProbBand:
+    """One explore-locked high-prob band scored once on later."""
+
+    band: str  # p80 / p90 / p95
+    quantile: float
+    threshold: float
+    threshold_method: str
+    n_high_later: int
+    later_fire_frac: float
+    high_up_hit_rate: float | None
+    high_up_lift_vs_base: float | None
+    high_spike_hit_rate: float | None
+    high_spike_lift_vs_base: float | None
+    beats_chance_high_prob: bool
+    beats_locked_up: bool | None
+    beats_locked_spike: bool | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class MultiBandFairTestResult:
+    """Shared model + locked-rule metrics with several explore-only high-prob bands."""
+
+    model_name: str
+    cut_date: str
+    n_explore: int
+    n_train: int
+    n_val: int
+    n_later: int
+    feature_cols: list[str]
+    primary_label: str
+    explore_up_rate: float
+    later_up_rate: float
+    later_spike_rate: float
+    later_auc: float | None
+    later_accuracy: float
+    later_accuracy_vs_chance: float
+    majority_baseline_acc: float
+    locked_n_fire: int
+    locked_up_hit_rate: float | None
+    locked_up_lift: float | None
+    locked_spike_hit_rate: float | None
+    locked_spike_lift: float | None
+    beats_chance_auc: bool
+    best_iteration: int | None
+    bands: list[HighProbBand]
+    notes: list[str] = field(default_factory=list)
+    feature_importance: dict[str, float] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        return d
+
+
+def _score_high_prob_band(
+    *,
+    band: str,
+    quantile: float,
+    thr: float,
+    thr_name: str,
+    proba_la: np.ndarray,
+    up_la: np.ndarray,
+    spike_la: np.ndarray,
+    later_up_rate: float,
+    later_spike_rate: float,
+    lock_up: float | None,
+    lock_spike: float | None,
+    n_lock: int,
+    label: str,
+    min_high_fires: int,
+) -> HighProbBand:
+    high = proba_la >= thr
+    n_high = int(high.sum())
+    n_later = int(len(proba_la))
+    high_up = _safe_rate(int((up_la[high] == 1).sum()), n_high) if n_high else None
+    high_spike = _safe_rate(int((spike_la[high] == 1).sum()), n_high) if n_high else None
+
+    if label == SECONDARY_LABEL:
+        primary_high = high_spike
+        primary_base = later_spike_rate
+        abs_gap_bar = 0.005
+    else:
+        primary_high = high_up
+        primary_base = later_up_rate
+        abs_gap_bar = 0.01
+
+    high_lift_primary = _lift(primary_high, primary_base)
+    beats_high = bool(
+        primary_high is not None
+        and n_high >= min_high_fires
+        and high_lift_primary is not None
+        and high_lift_primary >= 1.05
+        and (primary_high - primary_base) >= abs_gap_bar
+    )
+    beats_locked_up = None
+    if high_up is not None and lock_up is not None and n_high >= min_high_fires and n_lock >= 5:
+        beats_locked_up = bool(high_up > lock_up)
+    beats_locked_spike = None
+    if (
+        high_spike is not None
+        and lock_spike is not None
+        and n_high >= min_high_fires
+        and n_lock >= 5
+    ):
+        beats_locked_spike = bool(high_spike > lock_spike)
+
+    return HighProbBand(
+        band=band,
+        quantile=float(quantile),
+        threshold=float(thr),
+        threshold_method=thr_name,
+        n_high_later=n_high,
+        later_fire_frac=(float(n_high) / float(n_later)) if n_later else 0.0,
+        high_up_hit_rate=high_up,
+        high_up_lift_vs_base=_lift(high_up, later_up_rate),
+        high_spike_hit_rate=high_spike,
+        high_spike_lift_vs_base=_lift(high_spike, later_spike_rate),
+        beats_chance_high_prob=beats_high,
+        beats_locked_up=beats_locked_up,
+        beats_locked_spike=beats_locked_spike,
+    )
+
+
+def evaluate_multi_band_fair_test(
+    model: Any,
+    model_name: str,
+    explore: pd.DataFrame,
+    later: pd.DataFrame,
+    *,
+    cut_date: pd.Timestamp,
+    feature_cols: list[str],
+    feature_importance: dict[str, float],
+    n_train: int,
+    n_val: int,
+    band_methods: tuple[str, ...] | list[str] = DEFAULT_TIGHTEN_BANDS,
+    min_high_fires: int = 30,
+    best_iteration: int | None = None,
+    label: str = PRIMARY_LABEL,
+) -> MultiBandFairTestResult:
+    """Train-time thresholds from explore only; score each band once on later."""
+    from sklearn.metrics import accuracy_score, roc_auc_score
+
+    if label not in VALID_TARGETS:
+        raise ValueError(f"label must be one of {VALID_TARGETS}, got {label!r}")
+
+    notes: list[str] = []
+    X_ex, y_ex = _xy(explore, feature_cols, label)
+    proba_ex = predict_proba_positive(model, X_ex)
+
+    X_la, y_primary = _xy(later, feature_cols, label)
+    proba_la = predict_proba_positive(model, X_la)
+    y_primary_np = y_primary.to_numpy()
+
+    up_la = later[PRIMARY_LABEL].astype("float64").fillna(0).astype(int).to_numpy()
+    spike_la = later[SECONDARY_LABEL].astype("float64").fillna(0).astype(int).to_numpy()
+
+    later_up_rate = float(up_la.mean()) if len(up_la) else 0.0
+    later_spike_rate = float(spike_la.mean()) if len(spike_la) else 0.0
+    primary_later_rate = float(y_primary_np.mean()) if len(y_primary_np) else 0.0
+    majority = max(primary_later_rate, 1.0 - primary_later_rate)
+    pred_bin = (proba_la >= 0.5).astype(int)
+    acc = float(accuracy_score(y_primary_np, pred_bin)) if len(y_primary_np) else 0.0
+
+    try:
+        auc = (
+            float(roc_auc_score(y_primary_np, proba_la))
+            if len(np.unique(y_primary_np)) > 1
+            else None
+        )
+    except ValueError:
+        auc = None
+        notes.append("AUC undefined (single class in later).")
+
+    lock = locked_rule_mask(later).to_numpy()
+    n_lock = int(lock.sum())
+    lock_up = _safe_rate(int((up_la[lock] == 1).sum()), n_lock) if n_lock else None
+    lock_spike = _safe_rate(int((spike_la[lock] == 1).sum()), n_lock) if n_lock else None
+
+    if label == SECONDARY_LABEL:
+        notes.append(
+            "Primary label spike_50_7d (~3% base): evaluate with AUC + high-prob "
+            "spike lift vs base (accuracy alone is misleading vs ~97% majority)."
+        )
+        notes.append(
+            "High-prob thresholds (p80/p90/p95) locked on explore probabilities only; "
+            "later scored once per band — no peeking when choosing cuts."
+        )
+
+    bands: list[HighProbBand] = []
+    for method in band_methods:
+        if method not in EXPLORE_QUANTILE_METHODS:
+            raise ValueError(
+                f"band method {method!r} not in {sorted(EXPLORE_QUANTILE_METHODS)}"
+            )
+        q, _ = EXPLORE_QUANTILE_METHODS[method]
+        thr, thr_name = tune_threshold_explore(
+            y_ex.to_numpy(), proba_ex, method=method
+        )
+        # Canonical short name p80/p90/p95
+        band_name = f"p{int(round(q * 100))}"
+        band = _score_high_prob_band(
+            band=band_name,
+            quantile=q,
+            thr=thr,
+            thr_name=thr_name,
+            proba_la=proba_la,
+            up_la=up_la,
+            spike_la=spike_la,
+            later_up_rate=later_up_rate,
+            later_spike_rate=later_spike_rate,
+            lock_up=lock_up,
+            lock_spike=lock_spike,
+            n_lock=n_lock,
+            label=label,
+            min_high_fires=min_high_fires,
+        )
+        bands.append(band)
+
+    explore_primary = float(explore[label].astype(float).mean())
+    beats_auc = bool(auc is not None and auc > 0.5)
+
+    return MultiBandFairTestResult(
+        model_name=model_name,
+        cut_date=str(pd.Timestamp(cut_date).date()),
+        n_explore=int(len(explore)),
+        n_train=int(n_train),
+        n_val=int(n_val),
+        n_later=int(len(later)),
+        feature_cols=list(feature_cols),
+        primary_label=label,
+        explore_up_rate=explore_primary,
+        later_up_rate=later_up_rate,
+        later_spike_rate=later_spike_rate,
+        later_auc=auc,
+        later_accuracy=acc,
+        later_accuracy_vs_chance=acc - majority,
+        majority_baseline_acc=majority,
+        locked_n_fire=n_lock,
+        locked_up_hit_rate=lock_up,
+        locked_up_lift=_lift(lock_up, later_up_rate),
+        locked_spike_hit_rate=lock_spike,
+        locked_spike_lift=_lift(lock_spike, later_spike_rate),
+        beats_chance_auc=beats_auc,
+        best_iteration=best_iteration,
+        bands=bands,
+        notes=notes,
+        feature_importance=feature_importance,
+    )
+
+
+def run_phase_c_multi_band(
+    samples: pd.DataFrame,
+    *,
+    cut_date: str = DEFAULT_CUT_DATE,
+    val_frac: float = VAL_FRAC_OF_EXPLORE,
+    band_methods: tuple[str, ...] | list[str] = DEFAULT_TIGHTEN_BANDS,
+    feature_cols: tuple[str, ...] | list[str] = FEATURE_COLS,
+    target: str = PRIMARY_LABEL,
+) -> MultiBandFairTestResult:
+    """One train; several explore-locked high-prob bands fair-tested on later."""
+    if target not in VALID_TARGETS:
+        raise ValueError(f"target must be one of {VALID_TARGETS}, got {target!r}")
+    cols = list(feature_cols)
+    need = cols + [PRIMARY_LABEL, SECONDARY_LABEL]
+    df = samples.dropna(subset=[c for c in need if c in samples.columns]).copy()
+    explore, later, cut = split_explore_later(df, cut_date=cut_date)
+    train_df, val_df, val_start = carve_explore_val(explore, val_frac=val_frac)
+    logger.info(
+        "multi-band split explore=%s (train=%s val=%s val_start=%s) later=%s "
+        "cut=%s target=%s bands=%s",
+        len(explore),
+        len(train_df),
+        len(val_df),
+        val_start.date(),
+        len(later),
+        cut.date(),
+        target,
+        list(band_methods),
+    )
+    model, name, imp, best_it = train_classifier(
+        train_df, val_df, feature_cols=cols, label=target
+    )
+    if best_it is not None:
+        best_it = int(best_it)
+    result = evaluate_multi_band_fair_test(
+        model,
+        name,
+        explore,
+        later,
+        cut_date=cut,
+        feature_cols=cols,
+        feature_importance=imp,
+        n_train=len(train_df),
+        n_val=len(val_df),
+        band_methods=band_methods,
+        best_iteration=best_it,
+        label=target,
+    )
+    if best_it is not None and best_it == 40:
+        result.notes.append(
+            "Early stopping on explore-val collapsed (<10 trees); "
+            "used pre-specified fallback: fixed 40 trees on full explore "
+            "(train+val combined). Later window still untouched until final score."
+        )
+    elif best_it is not None and best_it <= 2:
+        result.notes.append(
+            f"Early stopping picked best_iteration={best_it} "
+            "(model barely left the first tree — treat later edge as weak)."
+        )
+    return result
+
+
+def write_spike50_tighten_report(
+    result: MultiBandFairTestResult,
+    path: Path | str,
+    *,
+    parquet_path: str | None = None,
+    script_path: str | None = None,
+    json_path: str | None = None,
+) -> Path:
+    """Plain multi-band spike50 tighten report (p80 vs p90 vs p95). No alpha."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(LAGOS).strftime("%Y-%m-%d %H:%M:%S WAT")
+
+    by_band = {b.band: b for b in result.bands}
+
+    def _band_row(b: HighProbBand) -> str:
+        return (
+            f"| **{b.band}** ({b.threshold_method}) | {_num(b.threshold, 4)} | "
+            f"{b.n_high_later:,} | {_pct(b.later_fire_frac)} | "
+            f"{_pct(b.high_spike_hit_rate)} | {_num(b.high_spike_lift_vs_base, 3)}x | "
+            f"{_pct(b.high_up_hit_rate)} | {_num(b.high_up_lift_vs_base, 3)}x | "
+            f"{'YES' if b.beats_chance_high_prob else 'NO'} | "
+            f"{'YES' if b.beats_locked_spike else ('NO' if b.beats_locked_spike is False else 'n/a')} |"
+        )
+
+    band_rows = "\n".join(_band_row(b) for b in result.bands)
+
+    # Short plain verdicts per band
+    verdict_lines: list[str] = []
+    for b in result.bands:
+        still = (
+            b.beats_chance_high_prob
+            and result.beats_chance_auc
+            and bool(b.beats_locked_spike)
+        )
+        verdict_lines.append(
+            f"- **{b.band}**: spike hit {_pct(b.high_spike_hit_rate)} "
+            f"(lift {_num(b.high_spike_lift_vs_base, 3)}x vs base {_pct(result.later_spike_rate)}); "
+            f"fires {b.n_high_later:,} ({_pct(b.later_fire_frac)} of later); "
+            f"beat chance+locked? **{'YES' if still else 'NO'}**"
+        )
+    verdict_block = "\n".join(verdict_lines)
+
+    # Overall: do tighter bands still beat?
+    tighter = [b for b in result.bands if b.band in ("p90", "p95")]
+    tighter_ok = [
+        b
+        for b in tighter
+        if b.beats_chance_high_prob
+        and result.beats_chance_auc
+        and bool(b.beats_locked_spike)
+    ]
+    if not tighter:
+        overall = "n/a — no tighter bands requested"
+    elif len(tighter_ok) == len(tighter):
+        overall = "YES — both p90 and p95 still beat chance + locked on later spike"
+    elif tighter_ok:
+        names = ", ".join(b.band for b in tighter_ok)
+        overall = (
+            f"MIXED — tighter band(s) that still beat chance+locked: {names}; "
+            "not all tighter bands cleared the bar"
+        )
+    else:
+        overall = "NO — tighter bands did not clearly beat chance + locked on later spike"
+
+    imp_sorted = sorted(
+        result.feature_importance.items(), key=lambda kv: kv[1], reverse=True
+    )
+    imp_lines = "\n".join(f"| `{k}` | {v:.4f} |" for k, v in imp_sorted) or "| — | — |"
+
+    notes_block = ""
+    if result.notes:
+        notes_block = "\n".join(f"- {n}" for n in result.notes)
+
+    p80 = by_band.get("p80")
+    p90 = by_band.get("p90")
+    p95 = by_band.get("p95")
+    compare_note = ""
+    if p80 is not None:
+        compare_note = (
+            f"Old p80 band covered {_pct(p80.later_fire_frac)} of later "
+            f"({p80.n_high_later:,} fires) — too wide for a ‘high-conviction’ read. "
+        )
+        if p90 is not None and p95 is not None:
+            compare_note += (
+                f"p90 covers {_pct(p90.later_fire_frac)}; "
+                f"p95 covers {_pct(p95.later_fire_frac)}."
+            )
+
+    body = f"""# Phase C spike50 — tighten high-prob bands fair test (Abdul)
+
+**When:** {now} (Africa/Lagos)  
+**Status:** research only — **not alpha**, not a trading system, no orders, no wallets  
+**Primary label:** `spike_50_7d` (max close within 7d ≥ +50%)  
+**Model:** `{result.model_name}` (one train; band cuts locked on **explore only**; later scored once per band)  
+**Trees used (early stop):** {result.best_iteration if result.best_iteration is not None else "n/a"}  
+**Bands:** p80 (old) vs p90 (top ~10%) vs p95 (top ~5%) — quantiles of explore predicted probability
+
+## Short answers
+
+- **Later spike AUC:** **{_num(result.later_auc, 4)}** (0.5 = coin flip); beats chance AUC? **{"YES" if result.beats_chance_auc else "NO"}**
+- **Do tighter bands still beat chance + locked?** **{overall}**
+- **Locked draft rule on later** (same window): fires **{result.locked_n_fire:,}**, spike hit **{_pct(result.locked_spike_hit_rate)}** (lift **{_num(result.locked_spike_lift, 3)}x** vs everyday **{_pct(result.later_spike_rate)}**)
+
+{verdict_block}
+
+{compare_note}
+
+**No alpha claim.** Do not trade on this. Small / short later window. Spike events are rare (~3%).
+
+## What we did (plain)
+
+1. Same Phase B Band C coin-day table + same features as the prior spike50 fair test.
+2. **Explore** = dates ≤ **{result.cut_date}** ({result.n_explore:,} rows).  
+   **Later** = dates after that ({result.n_later:,} rows). Thresholds chosen on explore only — **no peeking at later**.
+3. Validation carved from the **end of explore only** (train {result.n_train:,} / val {result.n_val:,}).
+4. Trained one small `{result.model_name}` on `spike_50_7d` (`scale_pos_weight` for rare positives).
+5. On **explore** predicted probs, locked three cuts: **p80** (old wide band), **p90**, **p95**.
+6. Scored **later once** per band. Compared spike hit % and lift vs everyday later spike rate and vs locked rule  
+   `rvol_30 > 1.5 AND dist_ema_20 <= 0.05`.
+
+## Features the model saw
+
+{", ".join(f"`{c}`" for c in result.feature_cols)}
+
+## Band comparison on later (locked cuts)
+
+| Band | Explore thr | Fires | % of later | Spike hit | Spike lift vs base | Up hit | Up lift | Beat chance (spike)? | Beat locked (spike)? |
+|------|------------:|------:|-----------:|----------:|-------------------:|-------:|--------:|---------------------:|---------------------:|
+{band_rows}
+
+Everyday later spike rate: **{_pct(result.later_spike_rate)}**. Everyday later up-in-7d: **{_pct(result.later_up_rate)}**.
+
+### Locked draft rule on the **same** later window
+
+| Metric | Value |
+|--------|------:|
+| Fires | {result.locked_n_fire:,} |
+| Spike≥50% hit | {_pct(result.locked_spike_hit_rate)} |
+| Spike lift vs base | {_num(result.locked_spike_lift, 3)}x |
+| Up-in-7d hit | {_pct(result.locked_up_hit_rate)} |
+| Up lift vs base | {_num(result.locked_up_lift, 3)}x |
+
+## Shared later ranking (not band-specific)
+
+| Metric | Value |
+|--------|------:|
+| Later rows | {result.n_later:,} |
+| Spike AUC | {_num(result.later_auc, 4)} |
+| Accuracy (@ prob≥0.5) | {_pct(result.later_accuracy)} |
+| Majority baseline accuracy | {_pct(result.majority_baseline_acc)} |
+
+## Feature importance (train — descriptive only)
+
+| feature | importance |
+|---------|-----------:|
+{imp_lines}
+
+## Notes
+
+{notes_block if notes_block else "- One train; explore-locked p80/p90/p95; later scored once per band."}
+
+## Files
+
+| Artifact | Path |
+|----------|------|
+| Dataset parquet | `{parquet_path or "data/ai/ai_samples_daily.parquet"}` |
+| Metrics JSON | `{json_path or "data/ai/phase_c_spike50_tighten_fair_test.json"}` |
+| This report | `{path}` |
+| Repro script | `{script_path or "scripts/run_ai_train.py --target spike_50_7d --bands p80,p90,p95"}` |
+
+## Explicit non-goals (honored)
+
+- No live signals / bots / wallets  
+- No X / social features  
+- No endless retuning on later  
+- No claim that the model “knows” the next spike  
+- **No alpha**
+"""
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def save_multi_band_result_json(
+    result: MultiBandFairTestResult, path: Path | str
+) -> Path:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result.to_dict(), indent=2, default=str), encoding="utf-8")
     return path
 
 

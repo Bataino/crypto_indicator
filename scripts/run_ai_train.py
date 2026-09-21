@@ -15,14 +15,35 @@ from cmram.config import DATA_DIR, get_duckdb_path
 from cmram.ml.dataset import FEATURE_COLS
 from cmram.ml.train import (
     DEFAULT_CUT_DATE,
+    DEFAULT_TIGHTEN_BANDS,
+    EXPLORE_QUANTILE_METHODS,
     PRIMARY_LABEL,
     SECONDARY_LABEL,
     VALID_TARGETS,
     load_ai_samples,
     run_phase_c,
+    run_phase_c_multi_band,
+    save_multi_band_result_json,
     save_result_json,
     write_phase_c_report,
+    write_spike50_tighten_report,
 )
+
+
+def _parse_bands(raw: str | None) -> list[str] | None:
+    """Parse comma-separated band keys (p80,p90,p95 / top_quintile / …)."""
+    if raw is None:
+        return None
+    parts = [p.strip() for p in raw.split(",") if p.strip()]
+    if not parts:
+        raise argparse.ArgumentTypeError("--bands must be non-empty")
+    bad = [p for p in parts if p not in EXPLORE_QUANTILE_METHODS]
+    if bad:
+        raise argparse.ArgumentTypeError(
+            f"unknown band(s) {bad}; "
+            f"choose from {sorted(EXPLORE_QUANTILE_METHODS)}"
+        )
+    return parts
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -63,27 +84,43 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--threshold-method",
         type=str,
-        choices=("top_quintile", "f1"),
+        choices=sorted(set(EXPLORE_QUANTILE_METHODS) | {"f1"}),
         default="top_quintile",
-        help="How to pick high-prob threshold on explore only.",
+        help="How to pick high-prob threshold on explore only (single-band mode).",
+    )
+    p.add_argument(
+        "--bands",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated explore-only high-prob cuts to fair-test together "
+            f"(e.g. p80,p90,p95). Default for spike tighten: "
+            f"{','.join(DEFAULT_TIGHTEN_BANDS)}. "
+            "When set, trains once and scores each band on later."
+        ),
     )
     p.add_argument(
         "--report",
         type=str,
         default=None,
-        help="Markdown report path (default depends on --target).",
+        help="Markdown report path (default depends on --target / --bands).",
     )
     p.add_argument(
         "--json-out",
         type=str,
         default=None,
-        help="JSON metrics dump path (default depends on --target).",
+        help="JSON metrics dump path (default depends on --target / --bands).",
     )
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args(argv)
 
 
-def _default_paths(target: str) -> tuple[str, str]:
+def _default_paths(target: str, bands: list[str] | None) -> tuple[str, str]:
+    if bands is not None and target == SECONDARY_LABEL:
+        return (
+            str(ROOT / "docs" / "reports" / "phase_c_spike50_tighten_fair_test.md"),
+            str(DATA_DIR / "ai" / "phase_c_spike50_tighten_fair_test.json"),
+        )
     if target == SECONDARY_LABEL:
         return (
             str(ROOT / "docs" / "reports" / "phase_c_spike50_lightgbm_fair_test.md"),
@@ -101,9 +138,17 @@ def main(argv: list[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    try:
+        bands = _parse_bands(args.bands)
+    except argparse.ArgumentTypeError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
+
+    # Spike tighten convenience: --bands with no value-ish default via explicit flag
+    # If user passes --bands alone empty, argparse gives ""; we already reject.
     parquet = Path(args.parquet)
     db = Path(args.db) if args.db else get_duckdb_path()
-    def_report, def_json = _default_paths(args.target)
+    def_report, def_json = _default_paths(args.target, bands)
     report_path = args.report or def_report
     json_out = args.json_out or def_json
 
@@ -114,6 +159,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  cut:     explore <= {args.cut_date}; later > cut")
     print(f"  features: {', '.join(FEATURE_COLS)}")
     print(f"  label:   {args.target}")
+    if bands is not None:
+        print(f"  bands:   {', '.join(bands)} (explore-locked; later once each)")
+    else:
+        print(f"  threshold-method: {args.threshold_method}")
 
     try:
         samples = load_ai_samples(
@@ -127,6 +176,51 @@ def main(argv: list[str] | None = None) -> int:
     if len(samples) == 0:
         print("ERROR: empty ai samples", file=sys.stderr)
         return 1
+
+    if bands is not None:
+        result = run_phase_c_multi_band(
+            samples,
+            cut_date=args.cut_date,
+            band_methods=bands,
+            target=args.target,
+        )
+        script = (
+            f"scripts/run_ai_train.py --target {args.target} "
+            f"--bands {','.join(bands)}"
+        )
+        report = write_spike50_tighten_report(
+            result,
+            report_path,
+            parquet_path=str(parquet),
+            script_path=script,
+            json_path=str(json_out),
+        )
+        jpath = save_multi_band_result_json(result, json_out)
+
+        print(f"  model:   {result.model_name}")
+        print(
+            f"  explore/train/val/later: "
+            f"{result.n_explore}/{result.n_train}/{result.n_val}/{result.n_later}"
+        )
+        print(f"  later AUC: {_fmt(result.later_auc)}")
+        print(
+            f"  locked rule later: fires={result.locked_n_fire} "
+            f"spike_hit={_fmt(result.locked_spike_hit_rate)} "
+            f"lift={_fmt(result.locked_spike_lift)}x"
+        )
+        for b in result.bands:
+            print(
+                f"  band {b.band} (thr={b.threshold:.4f}): fires={b.n_high_later} "
+                f"({100 * b.later_fire_frac:.1f}% later) "
+                f"spike_hit={_fmt(b.high_spike_hit_rate)} "
+                f"lift={_fmt(b.high_spike_lift_vs_base)}x "
+                f"beats_chance={b.beats_chance_high_prob} "
+                f"beats_locked_spike={b.beats_locked_spike}"
+            )
+        print(f"  beats chance (AUC>0.5)? {result.beats_chance_auc}")
+        print(f"  report: {report}")
+        print(f"  json:   {jpath}")
+        return 0
 
     result = run_phase_c(
         samples,
@@ -144,7 +238,10 @@ def main(argv: list[str] | None = None) -> int:
     jpath = save_result_json(result, json_out)
 
     print(f"  model:   {result.model_name}")
-    print(f"  explore/train/val/later: {result.n_explore}/{result.n_train}/{result.n_val}/{result.n_later}")
+    print(
+        f"  explore/train/val/later: "
+        f"{result.n_explore}/{result.n_train}/{result.n_val}/{result.n_later}"
+    )
     print(f"  later AUC: {_fmt(result.later_auc)}")
     print(f"  later accuracy: {result.later_accuracy:.4f} (majority {result.majority_baseline_acc:.4f})")
     if args.target == SECONDARY_LABEL:
