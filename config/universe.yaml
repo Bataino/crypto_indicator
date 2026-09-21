@@ -12,6 +12,10 @@ bands:
     label: "Band B"
     market_cap_min_usd: 10_000_000
     market_cap_max_usd: 100_000_000
+  C_1_100:
+    label: "Band C"
+    market_cap_min_usd: 1_000_000
+    market_cap_max_usd: 100_000_000
 
 # Entry convention (proposed, locked for Phase 1 scaffold)
 entry_convention: next_day_open

@@ -9,7 +9,8 @@ Candidate discovery via live ``/coins/markets`` pages only sees coins still
 listed on CoinGecko at scrape time. Assets that died, delisted, or left the
 MC bands are missing → survivorship bias if used as a historical universe
 without archived snapshots. Band membership here is a **recent snapshot**
-filter (MC in Band A $5–50M or Band B $10–100M), not point-in-time history.
+filter (MC union of all bands in universe.yaml, currently spanning
+Band C $1–100M through Band A/B), not point-in-time history.
 """
 
 from __future__ import annotations
@@ -38,8 +39,9 @@ SOURCE = "coingecko"
 DEFAULT_HISTORY_DAYS = 180
 MIN_BARS_DEFAULT = 90
 
-# Union of Band A lower and Band B upper for candidate scrape filter.
-BAND_UNION_MC_MIN = 5_000_000
+# Fallback MC union spanning narrowest configured floor to widest ceiling.
+# Prefer _band_union_bounds() which reads all bands from universe.yaml.
+BAND_UNION_MC_MIN = 1_000_000
 BAND_UNION_MC_MAX = 100_000_000
 
 
@@ -71,13 +73,18 @@ def _ms_to_date(ts_ms: float | int) -> date:
 
 
 def _band_union_bounds(universe: dict[str, Any] | None = None) -> tuple[float, float]:
-    """MC filter spanning Band A min through Band B max (DE Spec bands)."""
+    """MC filter spanning the union of *all* bands in universe.yaml.
+
+    Uses min(market_cap_min_usd) and max(market_cap_max_usd) across every
+    configured band (A/B/C/…), not a hard-coded A/B pair.
+    """
     cfg = universe or load_universe_config()
     bands = cfg.get("bands") or {}
     mins: list[float] = []
     maxs: list[float] = []
-    for key in ("A_5_50", "B_10_100"):
-        b = bands.get(key) or {}
+    for _key, b in bands.items():
+        if not isinstance(b, dict):
+            continue
         if "market_cap_min_usd" in b:
             mins.append(float(b["market_cap_min_usd"]))
         if "market_cap_max_usd" in b:
@@ -660,13 +667,21 @@ def ingest_coingecko(
                         include_ohlc=include_ohlc,
                         ingested_at=now,
                     )
-                    if bars is not None:
+                    if bars is not None and len(bars) >= min_bars:
                         from_raw = True
                         logger.info(
                             "Using on-disk raw chart for %s (%s bars)",
                             asset_id,
                             len(bars),
                         )
+                    elif bars is not None:
+                        logger.info(
+                            "Raw chart for %s too short (%s < %s); fetching API",
+                            asset_id,
+                            len(bars),
+                            min_bars,
+                        )
+                        bars = None
 
                 if bars is None:
                     try:

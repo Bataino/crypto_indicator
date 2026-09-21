@@ -17,6 +17,7 @@ TABLES = (
     "signals",
     "backtest_results",
     "runs",
+    "ai_samples_daily",
 )
 
 # Columns required on features_daily after Phase 1 Models A/B (compound key).

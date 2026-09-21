@@ -109,3 +109,23 @@ CREATE TABLE IF NOT EXISTS runs (
     git_or_spec_version TEXT,
     notes TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ai_samples_daily (
+    timestamp DATE,
+    asset_id TEXT,
+    rvol_30 DOUBLE,
+    dist_ema_20 DOUBLE,
+    dist_ema_50 DOUBLE,
+    rsi_14 DOUBLE,
+    ret_1d DOUBLE,
+    ret_3d DOUBLE,
+    ret_7d DOUBLE,
+    vol_14 DOUBLE,
+    log_mc DOUBLE,
+    up_7d INTEGER,
+    spike_50_7d INTEGER,
+    fwd_ret_7d DOUBLE,
+    band TEXT,
+    liquidity_pass BOOLEAN,
+    PRIMARY KEY (timestamp, asset_id, band)
+);

@@ -22,6 +22,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest"]
+ml = ["lightgbm", "scikit-learn"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

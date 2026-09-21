@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from cmram.config import get_duckdb_path, get_raw_dir, load_universe_config
 from cmram.ingest.coingecko import CoinGeckoError, RateLimitError
 from cmram.ingest.market import ingest_coingecko
+from cmram.secrets_env import ensure_env_secrets, secret_status
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -90,6 +91,15 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    # Load API keys from box-secrets into env before any CoinGecko calls.
+    # Never print secret values — presence + length only.
+    sec = ensure_env_secrets(("COINGECKO_API_KEY",))
+    st = sec.get("COINGECKO_API_KEY") or secret_status("COINGECKO_API_KEY")
+    print(
+        f"  COINGECKO_API_KEY: present={st.get('present')} "
+        f"length={st.get('length')}"
     )
 
     universe = load_universe_config()
