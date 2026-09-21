@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from cmram.config import DATA_DIR, get_duckdb_path
 from cmram.ml.dataset import FEATURE_COLS
+from cmram.ml.dataset import time_split_cut_date
 from cmram.ml.train import (
     DEFAULT_CUT_DATE,
     DEFAULT_TIGHTEN_BANDS,
@@ -26,6 +27,7 @@ from cmram.ml.train import (
     save_multi_band_result_json,
     save_result_json,
     write_phase_c_report,
+    write_spike50_altcut_report,
     write_spike50_tighten_report,
 )
 
@@ -68,8 +70,21 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     p.add_argument(
         "--cut-date",
         type=str,
-        default=DEFAULT_CUT_DATE,
-        help=f"Explore inclusive cut date (default {DEFAULT_CUT_DATE}).",
+        default=None,
+        help=(
+            f"Explore inclusive cut date (default {DEFAULT_CUT_DATE} when "
+            "--explore-frac is not set). Ignored when --explore-frac is set."
+        ),
+    )
+    p.add_argument(
+        "--explore-frac",
+        type=float,
+        default=None,
+        help=(
+            "Fraction of unique calendar days for explore (e.g. 0.6). "
+            "When set, derives and prints the cut date from the sample dates "
+            "(overrides --cut-date)."
+        ),
     )
     p.add_argument(
         "--target",
@@ -115,7 +130,23 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return p.parse_args(argv)
 
 
-def _default_paths(target: str, bands: list[str] | None) -> tuple[str, str]:
+def _default_paths(
+    target: str,
+    bands: list[str] | None,
+    *,
+    explore_frac: float | None = None,
+) -> tuple[str, str]:
+    # Alt-cut robustness report when explore_frac is set away from primary 0.7
+    if (
+        bands is not None
+        and target == SECONDARY_LABEL
+        and explore_frac is not None
+        and abs(float(explore_frac) - 0.7) > 1e-9
+    ):
+        return (
+            str(ROOT / "docs" / "reports" / "phase_c_spike50_altcut_fair_test.md"),
+            str(DATA_DIR / "ai" / "phase_c_spike50_altcut_fair_test.json"),
+        )
     if bands is not None and target == SECONDARY_LABEL:
         return (
             str(ROOT / "docs" / "reports" / "phase_c_spike50_tighten_fair_test.md"),
@@ -148,7 +179,16 @@ def main(argv: list[str] | None = None) -> int:
     # If user passes --bands alone empty, argparse gives ""; we already reject.
     parquet = Path(args.parquet)
     db = Path(args.db) if args.db else get_duckdb_path()
-    def_report, def_json = _default_paths(args.target, bands)
+    explore_frac = args.explore_frac
+    if explore_frac is not None and not (0.0 < float(explore_frac) < 1.0):
+        print(
+            f"ERROR: --explore-frac must be in (0,1), got {explore_frac}",
+            file=sys.stderr,
+        )
+        return 2
+    def_report, def_json = _default_paths(
+        args.target, bands, explore_frac=explore_frac
+    )
     report_path = args.report or def_report
     json_out = args.json_out or def_json
 
@@ -156,7 +196,6 @@ def main(argv: list[str] | None = None) -> int:
     print("  intent: research fair-test only — NOT alpha / not a bot")
     print(f"  parquet: {parquet}")
     print(f"  duckdb:  {db}")
-    print(f"  cut:     explore <= {args.cut_date}; later > cut")
     print(f"  features: {', '.join(FEATURE_COLS)}")
     print(f"  label:   {args.target}")
     if bands is not None:
@@ -177,24 +216,60 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: empty ai samples", file=sys.stderr)
         return 1
 
+    # Resolve cut: explore_frac derives cut from sample dates; else cut-date / default.
+    cut_date = args.cut_date
+    if explore_frac is not None:
+        cut_ts = time_split_cut_date(
+            samples["timestamp"], explore_frac=float(explore_frac)
+        )
+        cut_date = str(cut_ts.date())
+        print(
+            f"  cut:     explore <= {cut_date} "
+            f"(from explore_frac={float(explore_frac):.2f}); later > cut"
+        )
+    else:
+        cut_date = cut_date or DEFAULT_CUT_DATE
+        print(f"  cut:     explore <= {cut_date}; later > cut")
+
     if bands is not None:
         result = run_phase_c_multi_band(
             samples,
-            cut_date=args.cut_date,
+            cut_date=cut_date if explore_frac is None else None,
+            explore_frac=float(explore_frac) if explore_frac is not None else None,
             band_methods=bands,
             target=args.target,
         )
-        script = (
-            f"scripts/run_ai_train.py --target {args.target} "
-            f"--bands {','.join(bands)}"
+        script_bits = [
+            "scripts/run_ai_train.py",
+            f"--target {args.target}",
+            f"--bands {','.join(bands)}",
+        ]
+        if explore_frac is not None:
+            script_bits.append(f"--explore-frac {float(explore_frac)}")
+        else:
+            script_bits.append(f"--cut-date {cut_date}")
+        script = " ".join(script_bits)
+        use_altcut = (
+            explore_frac is not None
+            and abs(float(explore_frac) - 0.7) > 1e-9
+            and args.target == SECONDARY_LABEL
         )
-        report = write_spike50_tighten_report(
-            result,
-            report_path,
-            parquet_path=str(parquet),
-            script_path=script,
-            json_path=str(json_out),
-        )
+        if use_altcut:
+            report = write_spike50_altcut_report(
+                result,
+                report_path,
+                parquet_path=str(parquet),
+                script_path=script,
+                json_path=str(json_out),
+            )
+        else:
+            report = write_spike50_tighten_report(
+                result,
+                report_path,
+                parquet_path=str(parquet),
+                script_path=script,
+                json_path=str(json_out),
+            )
         jpath = save_multi_band_result_json(result, json_out)
 
         print(f"  model:   {result.model_name}")
@@ -224,7 +299,8 @@ def main(argv: list[str] | None = None) -> int:
 
     result = run_phase_c(
         samples,
-        cut_date=args.cut_date,
+        cut_date=cut_date if explore_frac is None else None,
+        explore_frac=float(explore_frac) if explore_frac is not None else None,
         threshold_method=args.threshold_method,
         target=args.target,
     )

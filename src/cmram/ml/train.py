@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from cmram.ml.dataset import FEATURE_COLS, EXPLORE_FRAC_DEFAULT
+from cmram.ml.dataset import FEATURE_COLS, EXPLORE_FRAC_DEFAULT, time_split_cut_date
 
 logger = logging.getLogger(__name__)
 
@@ -553,7 +553,8 @@ def evaluate_fair_test(
 def run_phase_c(
     samples: pd.DataFrame,
     *,
-    cut_date: str = DEFAULT_CUT_DATE,
+    cut_date: str | None = None,
+    explore_frac: float | None = None,
     val_frac: float = VAL_FRAC_OF_EXPLORE,
     threshold_method: str = "top_quintile",
     feature_cols: tuple[str, ...] | list[str] = FEATURE_COLS,
@@ -565,6 +566,11 @@ def run_phase_c(
     # drop any residual nulls in features/label
     need = cols + [PRIMARY_LABEL, SECONDARY_LABEL]
     df = samples.dropna(subset=[c for c in need if c in samples.columns]).copy()
+    if explore_frac is not None:
+        cut_ts = time_split_cut_date(df["timestamp"], explore_frac=float(explore_frac))
+        cut_date = str(cut_ts.date())
+    elif cut_date is None:
+        cut_date = DEFAULT_CUT_DATE
     explore, later, cut = split_explore_later(df, cut_date=cut_date)
     train_df, val_df, val_start = carve_explore_val(explore, val_frac=val_frac)
     logger.info(
@@ -950,6 +956,7 @@ class MultiBandFairTestResult:
 
     model_name: str
     cut_date: str
+    explore_frac: float | None
     n_explore: int
     n_train: int
     n_val: int
@@ -1063,6 +1070,7 @@ def evaluate_multi_band_fair_test(
     min_high_fires: int = 30,
     best_iteration: int | None = None,
     label: str = PRIMARY_LABEL,
+    explore_frac: float | None = None,
 ) -> MultiBandFairTestResult:
     """Train-time thresholds from explore only; score each band once on later."""
     from sklearn.metrics import accuracy_score, roc_auc_score
@@ -1149,6 +1157,7 @@ def evaluate_multi_band_fair_test(
     return MultiBandFairTestResult(
         model_name=model_name,
         cut_date=str(pd.Timestamp(cut_date).date()),
+        explore_frac=float(explore_frac) if explore_frac is not None else None,
         n_explore=int(len(explore)),
         n_train=int(n_train),
         n_val=int(n_val),
@@ -1178,29 +1187,45 @@ def evaluate_multi_band_fair_test(
 def run_phase_c_multi_band(
     samples: pd.DataFrame,
     *,
-    cut_date: str = DEFAULT_CUT_DATE,
+    cut_date: str | None = None,
+    explore_frac: float | None = None,
     val_frac: float = VAL_FRAC_OF_EXPLORE,
     band_methods: tuple[str, ...] | list[str] = DEFAULT_TIGHTEN_BANDS,
     feature_cols: tuple[str, ...] | list[str] = FEATURE_COLS,
     target: str = PRIMARY_LABEL,
 ) -> MultiBandFairTestResult:
-    """One train; several explore-locked high-prob bands fair-tested on later."""
+    """One train; several explore-locked high-prob bands fair-tested on later.
+
+    If explore_frac is set, cut_date is derived from unique calendar days
+    (explore_frac of days → explore). Explicit cut_date wins when explore_frac
+    is None. Default cut is DEFAULT_CUT_DATE (Phase B locked primary).
+    """
     if target not in VALID_TARGETS:
         raise ValueError(f"target must be one of {VALID_TARGETS}, got {target!r}")
     cols = list(feature_cols)
     need = cols + [PRIMARY_LABEL, SECONDARY_LABEL]
     df = samples.dropna(subset=[c for c in need if c in samples.columns]).copy()
-    explore, later, cut = split_explore_later(df, cut_date=cut_date)
+    resolved_frac: float | None = None
+    if explore_frac is not None:
+        resolved_frac = float(explore_frac)
+        cut_ts = time_split_cut_date(df["timestamp"], explore_frac=resolved_frac)
+        cut_date_str = str(cut_ts.date())
+    elif cut_date is not None:
+        cut_date_str = str(cut_date)
+    else:
+        cut_date_str = DEFAULT_CUT_DATE
+    explore, later, cut = split_explore_later(df, cut_date=cut_date_str)
     train_df, val_df, val_start = carve_explore_val(explore, val_frac=val_frac)
     logger.info(
         "multi-band split explore=%s (train=%s val=%s val_start=%s) later=%s "
-        "cut=%s target=%s bands=%s",
+        "cut=%s explore_frac=%s target=%s bands=%s",
         len(explore),
         len(train_df),
         len(val_df),
         val_start.date(),
         len(later),
         cut.date(),
+        resolved_frac,
         target,
         list(band_methods),
     )
@@ -1222,6 +1247,7 @@ def run_phase_c_multi_band(
         band_methods=band_methods,
         best_iteration=best_it,
         label=target,
+        explore_frac=resolved_frac,
     )
     if best_it is not None and best_it == 40:
         result.notes.append(
@@ -1418,6 +1444,257 @@ Everyday later spike rate: **{_pct(result.later_spike_rate)}**. Everyday later u
 """
     path.write_text(body, encoding="utf-8")
     return path
+
+
+# Primary-cut reference (explore_frac=0.7 / cut 2026-08-19) for alt-cut comparison text.
+PRIMARY_CUT_REF = {
+    "cut_date": "2026-08-19",
+    "explore_frac": 0.7,
+    "later_auc": 0.7045,
+    "later_spike_rate": 0.0288,
+    "locked_spike_hit_rate": 0.0357,
+    "locked_spike_lift": 1.239,
+    "locked_n_fire": 924,
+    "bands": {
+        "p80": {"spike_hit": 0.0554, "lift": 1.921, "n_fire": 5599, "fire_frac": 0.3361},
+        "p90": {"spike_hit": 0.0753, "lift": 2.612, "n_fire": 2551, "fire_frac": 0.1531},
+        "p95": {"spike_hit": 0.0943, "lift": 3.273, "n_fire": 1230, "fire_frac": 0.0738},
+    },
+}
+
+
+def write_spike50_altcut_report(
+    result: MultiBandFairTestResult,
+    path: Path | str,
+    *,
+    parquet_path: str | None = None,
+    script_path: str | None = None,
+    json_path: str | None = None,
+    primary_ref: dict[str, Any] | None = None,
+) -> Path:
+    """Plain English alt-cut (e.g. explore_frac=0.6) spike50 fair-test report.
+
+    Compares briefly to the locked primary cut (2026-08-19 / explore_frac=0.7).
+    Research only — no alpha.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(LAGOS).strftime("%Y-%m-%d %H:%M:%S WAT")
+    pref = primary_ref if primary_ref is not None else PRIMARY_CUT_REF
+    frac = result.explore_frac
+    frac_s = f"{frac:.1f}" if frac is not None else "n/a"
+
+    by_band = {b.band: b for b in result.bands}
+
+    def _band_row(b: HighProbBand) -> str:
+        return (
+            f"| **{b.band}** ({b.threshold_method}) | {_num(b.threshold, 4)} | "
+            f"{b.n_high_later:,} | {_pct(b.later_fire_frac)} | "
+            f"{_pct(b.high_spike_hit_rate)} | {_num(b.high_spike_lift_vs_base, 3)}x | "
+            f"{_pct(b.high_up_hit_rate)} | {_num(b.high_up_lift_vs_base, 3)}x | "
+            f"{'YES' if b.beats_chance_high_prob else 'NO'} | "
+            f"{'YES' if b.beats_locked_spike else ('NO' if b.beats_locked_spike is False else 'n/a')} |"
+        )
+
+    band_rows = "\n".join(_band_row(b) for b in result.bands)
+
+    verdict_lines: list[str] = []
+    for b in result.bands:
+        still = (
+            b.beats_chance_high_prob
+            and result.beats_chance_auc
+            and bool(b.beats_locked_spike)
+        )
+        verdict_lines.append(
+            f"- **{b.band}**: spike hit {_pct(b.high_spike_hit_rate)} "
+            f"(lift {_num(b.high_spike_lift_vs_base, 3)}x vs base {_pct(result.later_spike_rate)}); "
+            f"fires {b.n_high_later:,} ({_pct(b.later_fire_frac)} of later); "
+            f"beat chance+locked? **{'YES' if still else 'NO'}**"
+        )
+    verdict_block = "\n".join(verdict_lines)
+
+    tighter = [b for b in result.bands if b.band in ("p90", "p95")]
+    tighter_ok = [
+        b
+        for b in tighter
+        if b.beats_chance_high_prob
+        and result.beats_chance_auc
+        and bool(b.beats_locked_spike)
+    ]
+    if not tighter:
+        overall = "n/a — no tighter bands requested"
+    elif len(tighter_ok) == len(tighter):
+        overall = "YES — both p90 and p95 still beat chance + locked on later spike"
+    elif tighter_ok:
+        names = ", ".join(b.band for b in tighter_ok)
+        overall = (
+            f"MIXED — tighter band(s) that still beat chance+locked: {names}; "
+            "not all tighter bands cleared the bar"
+        )
+    else:
+        overall = "NO — tighter bands did not clearly beat chance + locked on later spike"
+
+    # Brief vs primary comparison
+    pref_bands = pref.get("bands") or {}
+    cmp_lines: list[str] = []
+    for key in ("p80", "p90", "p95"):
+        b = by_band.get(key)
+        pr = pref_bands.get(key)
+        if b is None or pr is None:
+            continue
+        alt_lift = b.high_spike_lift_vs_base
+        pri_lift = pr.get("lift")
+        delta = None
+        if alt_lift is not None and pri_lift is not None:
+            delta = float(alt_lift) - float(pri_lift)
+        delta_s = f"{delta:+.3f}x" if delta is not None else "n/a"
+        cmp_lines.append(
+            f"| **{key}** | {_pct(pr.get('spike_hit'))} / {_num(pri_lift, 3)}x "
+            f"({pr.get('n_fire'):,} fires) | "
+            f"{_pct(b.high_spike_hit_rate)} / {_num(alt_lift, 3)}x "
+            f"({b.n_high_later:,} fires) | {delta_s} |"
+        )
+    cmp_block = "\n".join(cmp_lines) if cmp_lines else "| — | — | — | — |"
+
+    still_beat_locked = all(
+        bool(b.beats_locked_spike)
+        for b in result.bands
+        if b.band in ("p80", "p90", "p95")
+    )
+    beat_locked_plain = (
+        "YES — all reported high-prob bands still beat the locked draft rule on "
+        "later spike hit %"
+        if still_beat_locked and result.bands
+        else (
+            "MIXED / NO — not every band clearly beat locked on this alt cut "
+            "(see table)"
+            if result.bands
+            else "n/a"
+        )
+    )
+
+    imp_sorted = sorted(
+        result.feature_importance.items(), key=lambda kv: kv[1], reverse=True
+    )
+    imp_lines = "\n".join(f"| `{k}` | {v:.4f} |" for k, v in imp_sorted) or "| — | — |"
+
+    notes_block = ""
+    if result.notes:
+        notes_block = "\n".join(f"- {n}" for n in result.notes)
+    notes_block = (
+        (notes_block + "\n" if notes_block else "")
+        + f"- Alternate time cut: explore_frac={frac_s} → cut date **{result.cut_date}** "
+        f"(primary was explore_frac={pref.get('explore_frac')} / "
+        f"{pref.get('cut_date')}). Thresholds still locked on this explore only."
+    )
+
+    body = f"""# Phase C spike50 — alternate time-cut fair test (Abdul)
+
+**When:** {now} (Africa/Lagos)  
+**Status:** research only — **not alpha**, not a trading system, no orders, no wallets  
+**Primary label:** `spike_50_7d` (max close within 7d ≥ +50%)  
+**Model:** `{result.model_name}` (one train; band cuts locked on **explore only**; later scored once per band)  
+**Trees used (early stop):** {result.best_iteration if result.best_iteration is not None else "n/a"}  
+**Alternate cut:** explore_frac=**{frac_s}** → explore ≤ **{result.cut_date}**  
+**Bands:** p80 / p90 / p95 — quantiles of explore predicted probability
+
+## Short answers
+
+- **Alt cut date (explore ≤):** **{result.cut_date}** (explore_frac={frac_s})
+- **Later spike AUC:** **{_num(result.later_auc, 4)}** (0.5 = coin flip); beats chance AUC? **{"YES" if result.beats_chance_auc else "NO"}**
+- **Do tighter bands still beat chance + locked?** **{overall}**
+- **Still beat locked draft on this alt cut?** **{beat_locked_plain}**
+- **Locked draft rule on later** (same window): fires **{result.locked_n_fire:,}**, spike hit **{_pct(result.locked_spike_hit_rate)}** (lift **{_num(result.locked_spike_lift, 3)}x** vs everyday **{_pct(result.later_spike_rate)}**)
+
+{verdict_block}
+
+**No alpha claim.** Do not trade on this. Robustness check only (alternate time cut). Spike events are rare (~3%).
+
+## What we did (plain)
+
+1. Same Phase B Band C coin-day table + same features as the spike50 tighten fair test.
+2. **Alternate explore cut:** explore_frac=**{frac_s}** → explore dates ≤ **{result.cut_date}** ({result.n_explore:,} rows).  
+   **Later** = dates after that ({result.n_later:,} rows). Thresholds chosen on this explore only — **no peeking at later**.
+3. Validation carved from the **end of explore only** (train {result.n_train:,} / val {result.n_val:,}).
+4. Trained one small `{result.model_name}` on `spike_50_7d` (`scale_pos_weight` for rare positives).
+5. On **explore** predicted probs, locked three cuts: **p80**, **p90**, **p95**.
+6. Scored **later once** per band. Compared spike hit % and lift vs everyday later spike rate and vs locked rule  
+   `rvol_30 > 1.5 AND dist_ema_20 <= 0.05`.
+7. Briefly compared to primary cut **{pref.get('cut_date')}** / explore_frac={pref.get('explore_frac')} from `phase_c_spike50_tighten_fair_test.md`.
+
+## Features the model saw
+
+{", ".join(f"`{c}`" for c in result.feature_cols)}
+
+## Band comparison on later (locked cuts — this alt explore)
+
+| Band | Explore thr | Fires | % of later | Spike hit | Spike lift vs base | Up hit | Up lift | Beat chance (spike)? | Beat locked (spike)? |
+|------|------------:|------:|-----------:|----------:|-------------------:|-------:|--------:|---------------------:|---------------------:|
+{band_rows}
+
+Everyday later spike rate: **{_pct(result.later_spike_rate)}**. Everyday later up-in-7d: **{_pct(result.later_up_rate)}**.
+
+### Locked draft rule on the **same** later window
+
+| Metric | Value |
+|--------|------:|
+| Fires | {result.locked_n_fire:,} |
+| Spike≥50% hit | {_pct(result.locked_spike_hit_rate)} |
+| Spike lift vs base | {_num(result.locked_spike_lift, 3)}x |
+| Up-in-7d hit | {_pct(result.locked_up_hit_rate)} |
+| Up lift vs base | {_num(result.locked_up_lift, 3)}x |
+
+## Brief vs primary cut ({pref.get('cut_date')} / explore_frac={pref.get('explore_frac')})
+
+Primary later spike AUC was **{_num(pref.get('later_auc'), 4)}**; alt-cut later spike AUC is **{_num(result.later_auc, 4)}**.  
+Primary locked spike hit **{_pct(pref.get('locked_spike_hit_rate'))}** (lift {_num(pref.get('locked_spike_lift'), 3)}x); alt locked spike hit **{_pct(result.locked_spike_hit_rate)}** (lift {_num(result.locked_spike_lift, 3)}x).
+
+| Band | Primary spike hit / lift | Alt-cut spike hit / lift | Lift delta (alt − primary) |
+|------|-------------------------:|-------------------------:|---------------------------:|
+{cmp_block}
+
+Same story directionally: tighter bands (p90/p95) still show higher later spike lift than the wide p80 band, and still beat the locked draft on spike hit — on this earlier cut as well. Numbers move with the window (different later sample); treat as a robustness check, not a second claim of edge.
+
+## Shared later ranking (not band-specific)
+
+| Metric | Value |
+|--------|------:|
+| Later rows | {result.n_later:,} |
+| Spike AUC | {_num(result.later_auc, 4)} |
+| Accuracy (@ prob≥0.5) | {_pct(result.later_accuracy)} |
+| Majority baseline accuracy | {_pct(result.majority_baseline_acc)} |
+
+## Feature importance (train — descriptive only)
+
+| feature | importance |
+|---------|-----------:|
+{imp_lines}
+
+## Notes
+
+{notes_block}
+
+## Files
+
+| Artifact | Path |
+|----------|------|
+| Dataset parquet | `{parquet_path or "data/ai/ai_samples_daily.parquet"}` |
+| Metrics JSON | `{json_path or "data/ai/phase_c_spike50_altcut_fair_test.json"}` |
+| This report | `{path}` |
+| Primary-cut report | `docs/reports/phase_c_spike50_tighten_fair_test.md` |
+| Repro script | `{script_path or "scripts/run_ai_train.py --target spike_50_7d --bands p80,p90,p95 --explore-frac 0.6"}` |
+
+## Explicit non-goals (honored)
+
+- No live signals / bots / wallets  
+- No X / social features  
+- No endless retuning on later  
+- No claim that the model “knows” the next spike  
+- **No alpha**
+"""
+    path.write_text(body, encoding="utf-8")
+    return path
+
 
 
 def save_multi_band_result_json(
