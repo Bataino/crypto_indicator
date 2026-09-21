@@ -27,6 +27,7 @@ LAGOS = ZoneInfo("Africa/Lagos")
 DEFAULT_CUT_DATE = "2026-08-19"
 PRIMARY_LABEL = "up_7d"
 SECONDARY_LABEL = "spike_50_7d"
+VALID_TARGETS = (PRIMARY_LABEL, SECONDARY_LABEL)
 
 # Locked draft rule (same as prior fair tests).
 LOCKED_RVOL = 1.5
@@ -62,7 +63,8 @@ class FairTestResult:
     n_val: int
     n_later: int
     feature_cols: list[str]
-    # explore base / threshold
+    primary_label: str
+    # explore base / threshold (explore_up_rate = explore rate of primary_label)
     explore_up_rate: float
     threshold: float
     threshold_method: str
@@ -172,6 +174,20 @@ def _try_lightgbm():
         return None
 
 
+def _scale_pos_weight(y: pd.Series | np.ndarray) -> float | None:
+    """Neg/pos weight for rare positives; None if balanced or no positives."""
+    y = np.asarray(y, dtype=int)
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    if n_pos <= 0 or n_neg <= 0:
+        return None
+    ratio = n_neg / n_pos
+    # Only apply when clearly imbalanced (spike ~3%).
+    if ratio < 3.0:
+        return None
+    return float(ratio)
+
+
 def train_classifier(
     train_df: pd.DataFrame,
     val_df: pd.DataFrame,
@@ -180,6 +196,8 @@ def train_classifier(
     label: str = PRIMARY_LABEL,
 ) -> tuple[Any, str, dict[str, float], int | None]:
     """Train small LightGBM; fall back to HistGradientBoosting or logistic."""
+    if label not in VALID_TARGETS:
+        raise ValueError(f"label must be one of {VALID_TARGETS}, got {label!r}")
     cols = list(feature_cols)
     X_tr, y_tr = _xy(train_df, cols, label)
     X_va, y_va = _xy(val_df, cols, label)
@@ -187,7 +205,17 @@ def train_classifier(
     lgb = _try_lightgbm()
     if lgb is not None:
         try:
-            model = lgb.LGBMClassifier(**LGBM_PARAMS)
+            params = dict(LGBM_PARAMS)
+            spw = _scale_pos_weight(y_tr)
+            if spw is not None:
+                params["scale_pos_weight"] = spw
+                logger.info(
+                    "class imbalance: scale_pos_weight=%.3f (label=%s pos_rate=%.4f)",
+                    spw,
+                    label,
+                    float(np.asarray(y_tr).mean()),
+                )
+            model = lgb.LGBMClassifier(**params)
             # Prefer new eval_X/eval_y API when available.
             try:
                 model.fit(
@@ -224,9 +252,15 @@ def train_classifier(
                 )
                 X_full = pd.concat([X_tr, X_va], axis=0)
                 y_full = pd.concat([y_tr, y_va], axis=0)
-                params = dict(LGBM_PARAMS)
-                params["n_estimators"] = 40
-                model = lgb.LGBMClassifier(**params)
+                params_fb = dict(params)
+                params_fb["n_estimators"] = 40
+                # Recalc weight on full explore train+val.
+                spw_full = _scale_pos_weight(y_full)
+                if spw_full is not None:
+                    params_fb["scale_pos_weight"] = spw_full
+                elif "scale_pos_weight" in params_fb:
+                    del params_fb["scale_pos_weight"]
+                model = lgb.LGBMClassifier(**params_fb)
                 model.fit(X_full, y_full)
                 best_it = 40
                 used_fallback = True
@@ -236,7 +270,10 @@ def train_classifier(
                 zip(cols, (float(x) for x in model.feature_importances_), strict=True)
             )
             logger.info(
-                "trained LightGBM trees=%s fallback=%s", best_it, used_fallback
+                "trained LightGBM trees=%s fallback=%s label=%s",
+                best_it,
+                used_fallback,
+                label,
             )
             return model, "lightgbm", imp, best_it
         except Exception as e:  # noqa: BLE001
@@ -246,6 +283,11 @@ def train_classifier(
 
     try:
         # Internal validation_fraction is random within train only (never later).
+        # class_weight not in HistGB; sample_weight approximates rare-positive focus.
+        sample_weight = None
+        spw = _scale_pos_weight(y_tr)
+        if spw is not None:
+            sample_weight = np.where(np.asarray(y_tr) == 1, spw, 1.0).astype("float64")
         model = HistGradientBoostingClassifier(
             max_depth=3,
             max_iter=100,
@@ -257,7 +299,10 @@ def train_classifier(
             n_iter_no_change=10,
             random_state=42,
         )
-        model.fit(X_tr, y_tr)
+        if sample_weight is not None:
+            model.fit(X_tr, y_tr, sample_weight=sample_weight)
+        else:
+            model.fit(X_tr, y_tr)
         imp = {c: 0.0 for c in cols}
         logger.info("trained HistGradientBoostingClassifier")
         return model, "hist_gradient_boosting", imp, getattr(model, "n_iter_", None)
@@ -279,6 +324,7 @@ def train_classifier(
                     solver="lbfgs",
                     random_state=42,
                     n_jobs=1,
+                    class_weight="balanced" if _scale_pos_weight(y_tr) else None,
                 ),
             ),
         ]
@@ -359,50 +405,77 @@ def evaluate_fair_test(
     threshold_method: str = "top_quintile",
     min_high_fires: int = 30,
     best_iteration: int | None = None,
+    label: str = PRIMARY_LABEL,
 ) -> FairTestResult:
     from sklearn.metrics import accuracy_score, roc_auc_score
 
+    if label not in VALID_TARGETS:
+        raise ValueError(f"label must be one of {VALID_TARGETS}, got {label!r}")
+
     notes: list[str] = []
-    X_ex, y_ex = _xy(explore, feature_cols)
+    # Threshold + AUC/accuracy are always on the *training* primary label.
+    X_ex, y_ex = _xy(explore, feature_cols, label)
     proba_ex = predict_proba_positive(model, X_ex)
     thr, thr_name = tune_threshold_explore(y_ex.to_numpy(), proba_ex, method=threshold_method)
 
-    X_la, y_la = _xy(later, feature_cols)
+    X_la, y_primary = _xy(later, feature_cols, label)
     proba_la = predict_proba_positive(model, X_la)
-    y_la_np = y_la.to_numpy()
+    y_primary_np = y_primary.to_numpy()
+
+    up_la = later[PRIMARY_LABEL].astype("float64").fillna(0).astype(int).to_numpy()
     spike_la = later[SECONDARY_LABEL].astype("float64").fillna(0).astype(int).to_numpy()
 
-    later_up_rate = float(y_la_np.mean()) if len(y_la_np) else 0.0
+    later_up_rate = float(up_la.mean()) if len(up_la) else 0.0
     later_spike_rate = float(spike_la.mean()) if len(spike_la) else 0.0
-    majority = max(later_up_rate, 1.0 - later_up_rate)
+    primary_later_rate = float(y_primary_np.mean()) if len(y_primary_np) else 0.0
+    majority = max(primary_later_rate, 1.0 - primary_later_rate)
     pred_bin = (proba_la >= 0.5).astype(int)
-    acc = float(accuracy_score(y_la_np, pred_bin)) if len(y_la_np) else 0.0
+    acc = float(accuracy_score(y_primary_np, pred_bin)) if len(y_primary_np) else 0.0
 
     try:
-        auc = float(roc_auc_score(y_la_np, proba_la)) if len(np.unique(y_la_np)) > 1 else None
+        auc = (
+            float(roc_auc_score(y_primary_np, proba_la))
+            if len(np.unique(y_primary_np)) > 1
+            else None
+        )
     except ValueError:
         auc = None
         notes.append("AUC undefined (single class in later).")
 
     high = proba_la >= thr
     n_high = int(high.sum())
-    high_up = _safe_rate(int((y_la_np[high] == 1).sum()), n_high) if n_high else None
+    high_up = _safe_rate(int((up_la[high] == 1).sum()), n_high) if n_high else None
     high_spike = _safe_rate(int((spike_la[high] == 1).sum()), n_high) if n_high else None
 
     lock = locked_rule_mask(later).to_numpy()
     n_lock = int(lock.sum())
-    lock_up = _safe_rate(int((y_la_np[lock] == 1).sum()), n_lock) if n_lock else None
+    lock_up = _safe_rate(int((up_la[lock] == 1).sum()), n_lock) if n_lock else None
     lock_spike = _safe_rate(int((spike_la[lock] == 1).sum()), n_lock) if n_lock else None
 
     beats_auc = bool(auc is not None and auc > 0.5)
-    # Require a meaningful edge vs base (not noise): lift >= 1.05 and >=1pp gap.
-    high_lift = _lift(high_up, later_up_rate)
+
+    # High-prob "beats chance" uses the primary label's hit rate vs its base.
+    if label == SECONDARY_LABEL:
+        primary_high = high_spike
+        primary_base = later_spike_rate
+        # Rare event: require lift >= 1.05 and >=0.5pp absolute gap (1pp would be huge).
+        abs_gap_bar = 0.005
+        notes.append(
+            "Primary label spike_50_7d (~3% base): evaluate with AUC + high-prob "
+            "spike lift vs base (accuracy alone is misleading vs ~97% majority)."
+        )
+    else:
+        primary_high = high_up
+        primary_base = later_up_rate
+        abs_gap_bar = 0.01
+
+    high_lift_primary = _lift(primary_high, primary_base)
     beats_high = bool(
-        high_up is not None
+        primary_high is not None
         and n_high >= min_high_fires
-        and high_lift is not None
-        and high_lift >= 1.05
-        and (high_up - later_up_rate) >= 0.01
+        and high_lift_primary is not None
+        and high_lift_primary >= 1.05
+        and (primary_high - primary_base) >= abs_gap_bar
     )
     beats_locked_up = None
     if high_up is not None and lock_up is not None and n_high >= min_high_fires and n_lock >= 5:
@@ -416,7 +489,7 @@ def evaluate_fair_test(
     ):
         beats_locked_spike = bool(high_spike > lock_spike)
 
-    explore_up = float(explore[PRIMARY_LABEL].astype(float).mean())
+    explore_primary = float(explore[label].astype(float).mean())
 
     return FairTestResult(
         model_name=model_name,
@@ -426,7 +499,8 @@ def evaluate_fair_test(
         n_val=int(n_val),
         n_later=int(len(later)),
         feature_cols=list(feature_cols),
-        explore_up_rate=explore_up,
+        primary_label=label,
+        explore_up_rate=explore_primary,
         threshold=float(thr),
         threshold_method=thr_name,
         later_up_rate=later_up_rate,
@@ -462,7 +536,10 @@ def run_phase_c(
     val_frac: float = VAL_FRAC_OF_EXPLORE,
     threshold_method: str = "top_quintile",
     feature_cols: tuple[str, ...] | list[str] = FEATURE_COLS,
+    target: str = PRIMARY_LABEL,
 ) -> FairTestResult:
+    if target not in VALID_TARGETS:
+        raise ValueError(f"target must be one of {VALID_TARGETS}, got {target!r}")
     cols = list(feature_cols)
     # drop any residual nulls in features/label
     need = cols + [PRIMARY_LABEL, SECONDARY_LABEL]
@@ -470,16 +547,17 @@ def run_phase_c(
     explore, later, cut = split_explore_later(df, cut_date=cut_date)
     train_df, val_df, val_start = carve_explore_val(explore, val_frac=val_frac)
     logger.info(
-        "split explore=%s (train=%s val=%s val_start=%s) later=%s cut=%s",
+        "split explore=%s (train=%s val=%s val_start=%s) later=%s cut=%s target=%s",
         len(explore),
         len(train_df),
         len(val_df),
         val_start.date(),
         len(later),
         cut.date(),
+        target,
     )
     model, name, imp, best_it = train_classifier(
-        train_df, val_df, feature_cols=cols
+        train_df, val_df, feature_cols=cols, label=target
     )
     if best_it is not None:
         best_it = int(best_it)
@@ -495,6 +573,7 @@ def run_phase_c(
         n_val=len(val_df),
         threshold_method=threshold_method,
         best_iteration=best_it,
+        label=target,
     )
     if best_it is not None and best_it == 40:
         result.notes.append(
@@ -529,6 +608,14 @@ def write_phase_c_report(
     parquet_path: str | None = None,
     script_path: str | None = None,
 ) -> Path:
+    """Write Abdul-facing markdown. Branches on result.primary_label."""
+    if getattr(result, "primary_label", PRIMARY_LABEL) == SECONDARY_LABEL:
+        return write_phase_c_spike50_report(
+            result,
+            path,
+            parquet_path=parquet_path,
+            script_path=script_path,
+        )
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     now = datetime.now(LAGOS).strftime("%Y-%m-%d %H:%M:%S WAT")
@@ -654,6 +741,160 @@ def write_phase_c_report(
 - No X / social features  
 - No endless retuning on later  
 - No claim that the model “knows” the next move  
+"""
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def write_phase_c_spike50_report(
+    result: FairTestResult,
+    path: Path | str,
+    *,
+    parquet_path: str | None = None,
+    script_path: str | None = None,
+) -> Path:
+    """Abdul-facing report when primary target is spike_50_7d."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    now = datetime.now(LAGOS).strftime("%Y-%m-%d %H:%M:%S WAT")
+
+    auc_ok = result.beats_chance_auc and result.later_auc is not None and result.later_auc >= 0.52
+    if result.beats_chance_high_prob and auc_ok:
+        chance_verdict = (
+            "YES — clearer than chance on later dates "
+            "(spike AUC and high-prob spike lift)"
+        )
+    elif result.beats_chance_high_prob:
+        chance_verdict = (
+            "MIXED — high-prob spike band beat base rate, but overall ranking weak"
+        )
+    elif result.beats_chance_auc and result.later_auc is not None and result.later_auc < 0.52:
+        chance_verdict = (
+            "NO — spike AUC only barely above 0.5 (noise territory); "
+            "high-prob band did not clearly beat everyday spike chance"
+        )
+    elif result.beats_chance_auc:
+        chance_verdict = (
+            "MIXED — spike ranking a bit better than a coin flip (AUC), "
+            "but the high-prob band did not clear a meaningful lift bar vs everyday spike rate"
+        )
+    else:
+        chance_verdict = "NO — did not clearly beat chance on later spike outcomes"
+
+    locked_line = "n/a"
+    if result.beats_locked_spike is True:
+        locked_line = (
+            "YES — high-prob spike hit beat the locked rule on later"
+        )
+    elif result.beats_locked_spike is False:
+        locked_line = (
+            "NO — high-prob spike hit did not beat the locked rule on later"
+        )
+
+    pass_bar = bool(
+        result.beats_chance_high_prob
+        and result.beats_chance_auc
+        and result.beats_locked_spike
+    )
+
+    imp_sorted = sorted(
+        result.feature_importance.items(), key=lambda kv: kv[1], reverse=True
+    )
+    imp_lines = "\n".join(f"| `{k}` | {v:.4f} |" for k, v in imp_sorted) or "| — | — |"
+
+    notes_block = ""
+    if result.notes:
+        notes_block = "\n".join(f"- {n}" for n in result.notes)
+
+    body = f"""# Phase C spike50 — LightGBM fair test (Abdul)
+
+**When:** {now} (Africa/Lagos)  
+**Status:** research only — **not alpha**, not a trading system, no orders, no wallets  
+**Primary label:** `spike_50_7d` (max close within 7d ≥ +50%)  
+**Model:** `{result.model_name}` (one train + one locked later score; class imbalance handled via `scale_pos_weight`)  
+**Trees used (early stop):** {result.best_iteration if result.best_iteration is not None else "n/a"}
+
+## Short answers
+
+- **Beats chance on later (spike)?** **{chance_verdict}**
+- **Beats locked draft rule on later (spike≥50% in 7d)?** **{locked_line}**
+- Later spike AUC: **{_num(result.later_auc, 4)}** (0.5 = coin flip)
+- Later accuracy (@0.5): **{_pct(result.later_accuracy)}** vs majority “no spike” baseline **{_pct(result.majority_baseline_acc)}** — **do not use accuracy alone** (base spike rate ~3%)
+- When model says “high chance of spike” (prob ≥ {_num(result.threshold, 4)}, method `{result.threshold_method}`):  
+  spike≥50% hit **{_pct(result.high_spike_hit_rate)}** vs later everyday **{_pct(result.later_spike_rate)}**  
+  (lift **{_num(result.high_spike_lift_vs_base, 3)}x**, fires **{result.n_high_later}**)
+- Same high-prob band, secondary up-in-7d: hit **{_pct(result.high_up_hit_rate)}** vs everyday **{_pct(result.later_up_rate)}** (lift **{_num(result.high_up_lift_vs_base, 3)}x**)
+
+- **Research pass bar** (beat chance **and** beat locked draft on later spike): **{"PASS" if pass_bar else "FAIL"}**
+
+**No alpha claim.** Do not trade on this. Small / short later window. Spike events are rare (~3%).
+
+## What we did (plain)
+
+1. Used the Phase B table of Band C coin-days with features + labels.
+2. **Explore** = dates ≤ **{result.cut_date}** ({result.n_explore:,} rows).  
+   **Later** = dates after that ({result.n_later:,} rows). We did **not** peek at later while training or picking the threshold.
+3. Carved a small validation slice from the **end of explore only** (train {result.n_train:,} / val {result.n_val:,}) for early stopping.
+4. Trained a **small** `{result.model_name}` to predict “did price spike ≥50% within 7 days?” (`spike_50_7d`), with `scale_pos_weight` for the ~3% positive class.
+5. Picked a “high chance” probability cutoff on **explore only** ({result.threshold_method}).
+6. Scored **later once**. Compared high-prob spike hit vs everyday later spike rate and vs the locked draft rule  
+   `rvol_30 > 1.5 AND dist_ema_20 <= 0.05`.
+
+## Features the model saw
+
+{", ".join(f"`{c}`" for c in result.feature_cols)}
+
+## Later fair check (locked) — primary = spike
+
+| Metric | Value |
+|--------|------:|
+| Later rows | {result.n_later:,} |
+| Everyday spike≥50% rate | {_pct(result.later_spike_rate)} |
+| Everyday up-in-7d rate | {_pct(result.later_up_rate)} |
+| Spike AUC | {_num(result.later_auc, 4)} |
+| Accuracy (@ prob≥0.5) | {_pct(result.later_accuracy)} |
+| Majority baseline accuracy | {_pct(result.majority_baseline_acc)} |
+| High-prob fires | {result.n_high_later:,} |
+| High-prob spike hit | {_pct(result.high_spike_hit_rate)} |
+| High-prob spike lift vs base | {_num(result.high_spike_lift_vs_base, 3)}x |
+| High-prob up hit | {_pct(result.high_up_hit_rate)} |
+| High-prob up lift vs base | {_num(result.high_up_lift_vs_base, 3)}x |
+
+### Locked draft rule on the **same** later window
+
+| Metric | Value |
+|--------|------:|
+| Fires | {result.locked_n_fire:,} |
+| Spike≥50% hit | {_pct(result.locked_spike_hit_rate)} |
+| Spike lift vs base | {_num(result.locked_spike_lift, 3)}x |
+| Up-in-7d hit | {_pct(result.locked_up_hit_rate)} |
+| Up lift vs base | {_num(result.locked_up_lift, 3)}x |
+
+## Feature importance (train — descriptive only)
+
+| feature | importance |
+|---------|-----------:|
+{imp_lines}
+
+## Notes
+
+{notes_block if notes_block else "- One train run; threshold locked on explore; later scored once."}
+
+## Files
+
+| Artifact | Path |
+|----------|------|
+| Dataset parquet | `{parquet_path or "data/ai/ai_samples_daily.parquet"}` |
+| Metrics JSON | `data/ai/phase_c_spike50_fair_test.json` |
+| This report | `{path}` |
+| Repro script | `{script_path or "scripts/run_ai_train.py --target spike_50_7d"}` |
+
+## Explicit non-goals (honored)
+
+- No live signals / bots / wallets  
+- No X / social features  
+- No endless retuning on later  
+- No claim that the model “knows” the next spike  
 """
     path.write_text(body, encoding="utf-8")
     return path
