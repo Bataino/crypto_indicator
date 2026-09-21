@@ -261,3 +261,7 @@ API keys via environment or box-secrets card (`COINGECKO_API_KEY`, `X_BEARER_TOK
 ## Next step
 
 Social N path: `run_social_ingest` → `run_features` (Model C) → signals/backtest. X needs a bearer token **and credits**; Santiment FREE has ~30d lag / ~1y window / ~1000 calls/mo. Reddit public often blocked from datacenter IPs. **Do not treat scores or backtest tables as alpha.**
+
+## Related AI trainer
+
+See [docs/RELATED_AI_TRAINER.md](docs/RELATED_AI_TRAINER.md) → https://github.com/Bataino/crypto_ai_trainer
